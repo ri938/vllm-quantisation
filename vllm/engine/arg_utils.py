@@ -1,7 +1,7 @@
 import argparse
 import dataclasses
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Literal
 
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
@@ -27,6 +27,7 @@ class EngineArgs:
     max_num_batched_tokens: int = 2560
     max_num_seqs: int = 256
     disable_log_stats: bool = False
+    quantisation: Optional[Literal["gptq"]] = None
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -126,6 +127,11 @@ class EngineArgs:
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='disable logging statistics')
+        parser.add_argument('--quantisation',
+                            type=str,
+                            default=None,
+                            choices=['gptq'],
+                            help='Inference using quantised weights')
         return parser
 
     @classmethod

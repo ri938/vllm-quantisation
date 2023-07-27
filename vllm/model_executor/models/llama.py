@@ -4,8 +4,7 @@
 # Copyright 2023 The vLLM team.
 # Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
 #
-# This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
-# and OPT implementations in this library. It has been modified from its
+# This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX # and OPT implementations in this library. It has been modified from its
 # original forms to accommodate minor architectural differences compared
 # to GPT-NeoX and OPT used by the Meta AI team that trained the model.
 #
@@ -262,6 +261,8 @@ class LlamaForCausalLM(nn.Module):
         tensor_model_parallel_rank = get_tensor_model_parallel_rank()
         state_dict = self.state_dict()
 
+        print('load weights', tensor_model_parallel_rank)
+
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, use_np_cache):
             if "rotary_emb.inv_freq" in name:
@@ -274,6 +275,7 @@ class LlamaForCausalLM(nn.Module):
                     continue
                 param = state_dict[name.replace(att_weight_name, "qkv_proj")]
                 shard_size = param.shape[0] // 3
+                print('shard size', shard_size)
                 loaded_weight = loaded_weight[
                     shard_size * tensor_model_parallel_rank:shard_size *
                     (tensor_model_parallel_rank + 1)]
