@@ -268,6 +268,8 @@ class LlamaForCausalLM(nn.Module):
             if "rotary_emb.inv_freq" in name:
                 continue
 
+            print('loading weights:', name)
+
             is_attention_weight = False
             for stride_id, att_weight_name in enumerate(
                 ["q_proj", "k_proj", "v_proj"]):
