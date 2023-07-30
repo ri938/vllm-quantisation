@@ -7,6 +7,7 @@ from safetensors.torch import load_file
 from vllm.model_executor.models import llama
 
 from vllm.model_executor.parallel_utils import parallel_state
+from vllm.model_executor.layers.gptq import QuantLinear
 import torch
 
 print('init distributed mode')
@@ -44,3 +45,38 @@ print('loading', path)
 
 # dict from name to value
 gptq_tensors = load_file(path)
+
+# RowParallelLinear
+target_layers = [l.mlp.down_proj for l in model.model.layers]
+
+
+examples = torch.rand((10, 13824), dtype=torch.float16).to(0)
+
+
+@torch.inference_mode()
+def forward_example(layer, examples):
+     return layer.forward(examples)[0]
+
+
+def get_quant_layer(gptq_tensors, N):
+    assert 0 <= N <= 39
+    qweight = gptq_tensors['model.layers.{}.mlp.down_proj.qweight'.format(N)]
+    g_idx = gptq_tensors['model.layers.{}.mlp.down_proj.g_idx'.format(N)]
+    qzeros = gptq_tensors['model.layers.{}.mlp.down_proj.qzeros'.format(N)]
+    scales = gptq_tensors['model.layers.{}.mlp.down_proj.scales'.format(N)]
+    return QuantLinear(qweight, qzeros, scales, g_idx, None, 4, 128)
+
+
+print('how did we do?')
+for layer in range(40):
+    print('#### layer', layer, '####')
+    target = forward_example(target_layers[layer], examples)
+    found = forward_example(target_layers[layer], examples)
+
+    diff = target - found
+    print(layer)
+    print('mean diff', diff.mean().cpu().item())
+    print('max diff', diff.max().cpu().item())
+    print()
+
+# g_idx, qweight, qzeros, scales   model.layers.N.down_proj.X for N in range(0, 40)

@@ -19,8 +19,7 @@ try:
                     "BLOCK_SIZE_N": 256,
                     "BLOCK_SIZE_K": 32,
                     "GROUP_SIZE_M": 8,
-                },
-                num_stages=4,
+                }, num_stages=4,
                 num_warps=4,
             ),
             triton.Config(
@@ -214,6 +213,14 @@ def matmul248(input, qweight, scales, qzeros, g_idx, bits, maxq):
             triton.cdiv(input.shape[0], META["BLOCK_SIZE_M"])
             * triton.cdiv(qweight.shape[1], META["BLOCK_SIZE_N"]),
         )
+
+        print(input.shape, input.dtype)
+        print(qweight.shape, qweight.dtype)
+        print(output.shape, output.dtype)
+        print(scales.shape, scales.dtype)
+        print(qzeros.shape, qzeros.dtype)
+        print(g_idx.shape, g_idx.dtype)
+
         matmul_248_kernel[grid](
             input,
             qweight,
