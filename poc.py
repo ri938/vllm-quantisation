@@ -25,6 +25,7 @@ parallel_state.initialize_model_parallel(tensor_model_parallel_size=1)
 
 
 config_path = '/mnt/models/Wizard-Vicuna-13B-Uncensored-HF/config.json'
+config_path = '/code/Wizard-Vicuna-7B-Uncensored-HF/config.json'
 
 config = LlamaConfig.from_json_file(config_path)
 
@@ -32,6 +33,7 @@ torch.set_default_dtype(torch.float16)
 model = llama.LlamaForCausalLM(config)
 
 weights_path = '/mnt/models/Wizard-Vicuna-13B-Uncensored-HF'
+weights_path = '/code/Wizard-Vicuna-7B-Uncensored-HF'
 
 print('loading weights from the original model')
 model.load_weights(weights_path)
@@ -41,6 +43,9 @@ print('loading the GPTQ weights')
 filename = 'Wizard-Vicuna-13B-Uncensored-GPTQ-4bit-g128.safetensors'
 folder = '/mnt/pvc/Wizard-Vicuna-13B-Uncensored-GPTQ-4bit-g128'
 path = os.path.join(folder, filename)
+path = '/code/Wizard-Vicuna-13B-Uncensored-GPTQ/Wizard-Vicuna-13B-Uncensored-GPTQ-4bit-128g.compat.no-act-order.safetensors'
+path = '/code/Wizard-Vicuna-13B-Uncensored-GPTQ/Wizard-Vicuna-13B-Uncensored-GPTQ-4bit-128g.latest.act-order.safetensors'
+path = '/code/Wizard-Vicuna-7B-Uncensored-GPTQ/Wizard-Vicuna-7B-Uncensored-GPTQ-4bit-128g.no-act-order.safetensors'
 print('loading', path)
 
 # dict from name to value
@@ -51,6 +56,7 @@ target_layers = [l.mlp.down_proj for l in model.model.layers]
 
 
 examples = torch.rand((10, 13824), dtype=torch.float16).to(0)
+examples = torch.rand((10, 11008), dtype=torch.float16).to(0)
 
 
 @torch.inference_mode()
@@ -71,12 +77,11 @@ print('how did we do?')
 for layer in range(40):
     print('#### layer', layer, '####')
     target = forward_example(target_layers[layer], examples)
-    found = forward_example(target_layers[layer], examples)
+    found = get_quant_layer(gptq_tensors, layer).to(0).forward(examples)
 
     diff = target - found
+    import pdb; pdb.set_trace()
     print(layer)
     print('mean diff', diff.mean().cpu().item())
     print('max diff', diff.max().cpu().item())
     print()
-
-# g_idx, qweight, qzeros, scales   model.layers.N.down_proj.X for N in range(0, 40)
