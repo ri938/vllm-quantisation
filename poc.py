@@ -60,13 +60,31 @@ def forward_example(layer, examples):
      return layer.forward(examples)[0]
 
 
-def get_quant_layer(gptq_tensors, N, name='down_proj'):
+def get_quant_layer(gptq_tensors, N, name):
     assert 0 <= N <= 39
-    qweight = gptq_tensors['model.layers.{}.mlp.{}.qweight'.format(N, name)]
-    g_idx = gptq_tensors['model.layers.{}.mlp.{}.g_idx'.format(N, name)]
-    qzeros = gptq_tensors['model.layers.{}.mlp.{}.qzeros'.format(N, name)]
-    scales = gptq_tensors['model.layers.{}.mlp.{}.scales'.format(N, name)]
+    qweight = gptq_tensors['model.layers.{}.{}.qweight'.format(N, name)]
+    g_idx = gptq_tensors['model.layers.{}.{}.g_idx'.format(N, name)]
+    qzeros = gptq_tensors['model.layers.{}.{}.qzeros'.format(N, name)]
+    scales = gptq_tensors['model.layers.{}.{}.scales'.format(N, name)]
     return QuantLinear(qweight, qzeros, scales, g_idx, None, 4, 128)
+
+
+def get_multiple_quant_layer(gptq_tensors, N, names):
+    assert 0 <= N <= 39
+
+    qweights = [gptq_tensors['model.layers.{}.{}.qweight'.format(N, name)] for name in names]
+    qzeros = [gptq_tensors['model.layers.{}.{}.qzeros'.format(N, name)] for name in names]
+    scales = [gptq_tensors['model.layers.{}.{}.scales'.format(N, name)] for name in names]
+    g_idxs = [gptq_tensors['model.layers.{}.{}.g_idx'.format(N, name)] for name in names]
+
+    qweight = torch.cat(qweights, dim=1)
+    qzeros = torch.cat(qzeros, dim=1)
+    scales = torch.cat(scales, dim=1)
+
+    for item in g_idxs[1:]:
+        torch.testing.assert_close(item, g_idxs[0])
+
+    return QuantLinear(qweight, qzeros, scales, g_idxs[0], None, 4, 128)
 
 
 def compare_raw_modules(target_layers, quant_layers, examples):
@@ -116,23 +134,28 @@ def add_save_tensor_hook(raw_model):
             layer.register_forward_hook(fn)
 
 
-def merge_down_proj_layers(raw_model, gptq_tensors):
-    print('quantising mlp.down_proj....')
+def quantise_multiple_layers(raw_model, gptq_tensors, names, output_name):
+    print('quantising {} to {}...'.format(','.join(names), output_name))
     for pos in range(0, 40):
-        name = 'model.layers.{}.mlp.down_proj'.format(pos)
-        #print('replacing layer', name)
-        quant_layer = get_quant_layer(gptq_tensors, pos, name='down_proj').to(0)
+        name = 'model.layers.{}.{}'.format(pos, output_name)
+        quant_layer = get_multiple_quant_layer(gptq_tensors, pos, names).to(0)
         parent = '.'.join(name.split('.')[1:-1])
-        raw_model.get_submodule(parent).down_proj = quant_layer
+        key = output_name.split('.')[-1]
+        setattr(raw_model.get_submodule(parent), key, quant_layer)
     return raw_model
 
 
-def merge_up_gate_proj_layers(raw_model, gptq_tensors):
-    print('quantising mlp.up_proj and mlp.gate_proj....')
-    pass
+def quantise_single_layer(raw_model, gptq_tensors, name):
+    print('quantising {}....'.format(name))
+    for pos in range(0, 40):
+        target_name = 'model.layers.{}.{}'.format(pos, name)
+        quant_layer = get_quant_layer(gptq_tensors, pos, name=name).to(0)
+        parent = '.'.join(target_name.split('.')[1:-1])
+        key = name.split('.')[-1]
+        setattr(raw_model.get_submodule(parent), key, quant_layer)
+    return raw_model
 
 
-@torch.inference_mode()
 def print_example_responses(model):
     example_inputs = [
         'AI is going to',
@@ -142,16 +165,21 @@ def print_example_responses(model):
     ]
 
     for line in example_inputs:
-        print('input:', line)
-        start = time.time()
-        params = SamplingParams(max_tokens=128, logprobs=10)
-        resp = model.generate(line, params, use_tqdm=False)[0].outputs[0]
-        duration = time.time() - start
-        num_new_tokens = len(resp.token_ids)
-        print('output:', resp.text)
-        print('token / second', num_new_tokens / duration)
-        print('duration', duration)
+        test_response(model, line)
         print()
+
+
+@torch.inference_mode()
+def test_response(model, line):
+    print('input:', line)
+    start = time.time()
+    params = SamplingParams(max_tokens=128, logprobs=10)
+    resp = model.generate(line, params, use_tqdm=False)[0].outputs[0]
+    duration = time.time() - start
+    num_new_tokens = len(resp.token_ids)
+    print('output:', resp.text)
+    print('token / second', num_new_tokens / duration)
+    print('duration', duration)
 
 
 if __name__ == '__main__':
@@ -166,7 +194,7 @@ if __name__ == '__main__':
     gptq_tensors = load_file(QUANTISED_WEIGHTS)
 
     print('#### BEFORE ####')
-    print_example_responses(model)
+    #print_example_responses(model)
 
     print()
 
@@ -174,9 +202,26 @@ if __name__ == '__main__':
     before = calculate_memory_usage(model.llm_engine.workers[0].model) / gb_in_bytes
     print('MEMORY BEFORE (GB)', before)
 
-    print('quantising layers')
-    merge_down_proj_layers(raw_model, gptq_tensors)
-    merge_up_gate_proj_layers(raw_model, gptq_tensors)
+    print('#### quantising layers ####')
+    quantise_single_layer(raw_model, gptq_tensors, 'mlp.down_proj')
+
+    quantise_multiple_layers(
+        raw_model,
+        gptq_tensors,
+        ['mlp.gate_proj', 'mlp.up_proj'],
+        'mlp.gate_up_proj'
+    )
+
+    quantise_single_layer(raw_model, gptq_tensors, 'self_attn.o_proj')
+
+    quantise_multiple_layers(
+        raw_model,
+        gptq_tensors,
+        ['self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj'],
+        'self_attn.qkv_proj'
+    )
+
+    print(raw_model)
 
     after = calculate_memory_usage(model.llm_engine.workers[0].model) / gb_in_bytes
     print('MEMORY AFTER (GB)', after)
