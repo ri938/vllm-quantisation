@@ -5,58 +5,69 @@ import os
 from safetensors.torch import load_file
 
 from vllm.model_executor.models import llama
-
+from vllm import LLM
 from vllm.model_executor.parallel_utils import parallel_state
 from vllm.model_executor.layers.gptq import QuantLinear
+from functools import partial
 import torch
 
-print('init distributed mode')
-port = 8011
-distributed_init_method = f"tcp://localhost:{port}"
 
-torch.distributed.init_process_group(
-    'nccl',
-    world_size=1,
-    rank=0,
-    init_method=distributed_init_method
-)
-
-parallel_state.initialize_model_parallel(tensor_model_parallel_size=1)
+WEIGHTS_PATH = '/mnt/models/Wizard-Vicuna-13B-Uncensored-HF'
 
 
-config_path = '/mnt/models/Wizard-Vicuna-13B-Uncensored-HF/config.json'
-config_path = '/code/Wizard-Vicuna-7B-Uncensored-HF/config.json'
+def get_raw_model():
+    print('init distributed mode')
+    port = 8011
+    distributed_init_method = f"tcp://localhost:{port}"
 
-config = LlamaConfig.from_json_file(config_path)
+    torch.distributed.init_process_group(
+        'nccl',
+        world_size=1,
+        rank=0,
+        init_method=distributed_init_method
+    )
 
-torch.set_default_dtype(torch.float16)
-model = llama.LlamaForCausalLM(config)
+    parallel_state.initialize_model_parallel(tensor_model_parallel_size=1)
 
-weights_path = '/mnt/models/Wizard-Vicuna-13B-Uncensored-HF'
-weights_path = '/code/Wizard-Vicuna-7B-Uncensored-HF'
+    config_path = '/mnt/models/Wizard-Vicuna-13B-Uncensored-HF/config.json'
+    #config_path = '/code/Wizard-Vicuna-7B-Uncensored-HF/config.json'
 
-print('loading weights from the original model')
-model.load_weights(weights_path)
+    config = LlamaConfig.from_json_file(config_path)
+
+    torch.set_default_dtype(torch.float16)
+    model = llama.LlamaForCausalLM(config)
+
+    print('loading weights from the original model')
+    model.load_weights(WEIGHTS_PATH)
+    return model
+
+
+def get_basic_model():
+    print('loading basic model')
+    return LLM(WEIGHTS_PATH)
+
+
+model = get_basic_model()
 
 
 print('loading the GPTQ weights')
 filename = 'Wizard-Vicuna-13B-Uncensored-GPTQ-4bit-g128.safetensors'
 folder = '/mnt/pvc/Wizard-Vicuna-13B-Uncensored-GPTQ-4bit-g128'
 path = os.path.join(folder, filename)
-path = '/code/Wizard-Vicuna-13B-Uncensored-GPTQ/Wizard-Vicuna-13B-Uncensored-GPTQ-4bit-128g.compat.no-act-order.safetensors'
-path = '/code/Wizard-Vicuna-13B-Uncensored-GPTQ/Wizard-Vicuna-13B-Uncensored-GPTQ-4bit-128g.latest.act-order.safetensors'
-path = '/code/Wizard-Vicuna-7B-Uncensored-GPTQ/Wizard-Vicuna-7B-Uncensored-GPTQ-4bit-128g.no-act-order.safetensors'
 print('loading', path)
 
 # dict from name to value
 gptq_tensors = load_file(path)
 
 # RowParallelLinear
-target_layers = [l.mlp.down_proj for l in model.model.layers]
+raw_model = model.llm_engine.workers[0].model.model
+target_layers = [l.mlp.down_proj for l in raw_model.layers]
 
 
 examples = torch.rand((10, 13824), dtype=torch.float16).to(0)
-examples = torch.rand((10, 11008), dtype=torch.float16).to(0)
+#examples = torch.rand((10, 11008), dtype=torch.float16).to(0)
+
+examples = {i: torch.load('/tmp/layers.{}.mlp.down_proj.torch'.format(i))[0].to(0) for i in range(0, 40)}
 
 
 @torch.inference_mode()
@@ -76,12 +87,32 @@ def get_quant_layer(gptq_tensors, N):
 print('how did we do?')
 for layer in range(40):
     print('#### layer', layer, '####')
-    target = forward_example(target_layers[layer], examples)
-    found = get_quant_layer(gptq_tensors, layer).to(0).forward(examples)
+    exs = examples[layer][0, :]
+
+    target = forward_example(target_layers[layer], exs)
+    found = get_quant_layer(gptq_tensors, layer).to(0).forward(exs)
 
     diff = target - found
-    import pdb; pdb.set_trace()
-    print(layer)
-    print('mean diff', diff.mean().cpu().item())
-    print('max diff', diff.max().cpu().item())
+
+    print('mean diff', diff.abs().mean().cpu().item())
+    print('max diff', diff.abs().max().cpu().item())
+    print('raw', diff.abs().cpu())
+    print('target', target.cpu())
+    print('found', found.cpu())
     print()
+
+
+def save_tensors(module, inputs, output, name):
+    path = '/tmp/{}.torch'.format(name)
+    print('saving tensors to path', path)
+    torch.save(inputs, path)
+
+
+def add_save_tensor_hook(raw_model):
+    print('all layers')
+    for name, layer in raw_model.named_modules():
+        #print(name, layer)
+        if name.endswith('down_proj'):
+            print('registering hook for {}'.format(name))
+            fn = partial(save_tensors, name=name)
+            layer.register_forward_hook(fn)
