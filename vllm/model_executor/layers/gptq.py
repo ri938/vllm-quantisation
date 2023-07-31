@@ -280,4 +280,6 @@ class QuantLinear(nn.Module):
             self.maxq,
         )
         out = out + self.bias if self.bias is not None else out
-        return out.reshape(out_shape)
+        # return None for now just because its expecting something like this?
+        # TODO: work out what it should be
+        return out.reshape(out_shape), None

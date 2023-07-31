@@ -5,11 +5,12 @@ import os
 from safetensors.torch import load_file
 
 from vllm.model_executor.models import llama
-from vllm import LLM
+from vllm import LLM, SamplingParams
 from vllm.model_executor.parallel_utils import parallel_state
 from vllm.model_executor.layers.gptq import QuantLinear
 from functools import partial
 import torch
+import time
 
 
 WEIGHTS_PATH = '/mnt/models/Wizard-Vicuna-13B-Uncensored-HF'
@@ -91,6 +92,10 @@ for layer in range(40):
 
     target = forward_example(target_layers[layer], exs)
     found = get_quant_layer(gptq_tensors, layer).to(0).forward(exs)
+    
+    # added an extra None to make compatible. what is going on here?
+    if len(found) > 1:
+        found = found[0]
 
     diff = target - found
 
@@ -108,6 +113,14 @@ def save_tensors(module, inputs, output, name):
     torch.save(inputs, path)
 
 
+def calculate_memory_usage(model):
+    # doesnt include the peak usage for the forward pass
+    # returns in bytes
+    mem_params = sum([param.nelement()*param.element_size() for param in model.parameters()])
+    mem_bufs = sum([buf.nelement()*buf.element_size() for buf in model.buffers()])
+    return mem_params + mem_bufs
+
+
 def add_save_tensor_hook(raw_model):
     print('all layers')
     for name, layer in raw_model.named_modules():
@@ -116,3 +129,50 @@ def add_save_tensor_hook(raw_model):
             print('registering hook for {}'.format(name))
             fn = partial(save_tensors, name=name)
             layer.register_forward_hook(fn)
+
+
+def merge_quantised_layers(raw_model, gptq_tensors):
+    for pos in range(0, 40):
+        name = 'model.layers.{}.mlp.down_proj'.format(pos)
+        #print('replacing layer', name)
+        quant_layer = get_quant_layer(gptq_tensors, pos).to(0)
+        parent = '.'.join(name.split('.')[1:-1])
+        raw_model.get_submodule(parent).down_proj = quant_layer
+    return raw_model
+
+
+@torch.inference_mode()
+def print_example_responses(model):
+    example_inputs = [
+        'AI is going to',
+        'The capitol of France is',
+        'Now this is a story all about how, my',
+        'This is a story about a frog who',
+    ]
+
+    for line in example_inputs:
+        print('input:', line)
+        start = time.time()
+        params = SamplingParams(max_tokens=128, logprobs=10)
+        resp = model.generate(line, params, use_tqdm=False)[0].outputs[0]
+        duration = time.time() - start
+        num_new_tokens = len(resp.token_ids)
+        print('output:', resp.text)
+        print('token / second', num_new_tokens / duration)
+        print('duration', duration)
+        print()
+
+print('#### BEFORE ####')
+#print_example_responses(model)
+
+print()
+
+gb_in_bytes = 1024 ** 3
+print('MEMORY BEFORE', calculate_memory_usage(model.llm_engine.workers[0].model) / gb_in_bytes)
+merge_quantised_layers(raw_model, gptq_tensors)
+print('MEMORY AFTER', calculate_memory_usage(model.llm_engine.workers[0].model) / gb_in_bytes)
+
+print()
+
+print('#### AFTER ####')
+print_example_responses(model)
