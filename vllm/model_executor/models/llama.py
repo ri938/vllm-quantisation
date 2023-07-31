@@ -268,7 +268,7 @@ class LlamaForCausalLM(nn.Module):
             if "rotary_emb.inv_freq" in name:
                 continue
 
-            print('loading weights:', name)
+            #print('loading weights:', name)
 
             is_attention_weight = False
             for stride_id, att_weight_name in enumerate(
@@ -277,7 +277,6 @@ class LlamaForCausalLM(nn.Module):
                     continue
                 param = state_dict[name.replace(att_weight_name, "qkv_proj")]
                 shard_size = param.shape[0] // 3
-                print('shard size', shard_size)
                 loaded_weight = loaded_weight[
                     shard_size * tensor_model_parallel_rank:shard_size *
                     (tensor_model_parallel_rank + 1)]

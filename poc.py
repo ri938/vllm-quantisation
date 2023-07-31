@@ -13,7 +13,13 @@ import torch
 import time
 
 
+# original huggingface weights
 WEIGHTS_PATH = '/mnt/models/Wizard-Vicuna-13B-Uncensored-HF'
+
+# quantised weights
+filename = 'Wizard-Vicuna-13B-Uncensored-GPTQ-4bit-g128.safetensors'
+folder = '/mnt/pvc/Wizard-Vicuna-13B-Uncensored-GPTQ-4bit-g128'
+QUANTISED_WEIGHTS = os.path.join(folder, filename)
 
 
 def get_raw_model():
@@ -31,7 +37,7 @@ def get_raw_model():
     parallel_state.initialize_model_parallel(tensor_model_parallel_size=1)
 
     config_path = '/mnt/models/Wizard-Vicuna-13B-Uncensored-HF/config.json'
-    #config_path = '/code/Wizard-Vicuna-7B-Uncensored-HF/config.json'
+    config_path = os.path.join(WEIGHTS_PATH, config_path)
 
     config = LlamaConfig.from_json_file(config_path)
 
@@ -48,63 +54,42 @@ def get_basic_model():
     return LLM(WEIGHTS_PATH)
 
 
-model = get_basic_model()
-
-
-print('loading the GPTQ weights')
-filename = 'Wizard-Vicuna-13B-Uncensored-GPTQ-4bit-g128.safetensors'
-folder = '/mnt/pvc/Wizard-Vicuna-13B-Uncensored-GPTQ-4bit-g128'
-path = os.path.join(folder, filename)
-print('loading', path)
-
-# dict from name to value
-gptq_tensors = load_file(path)
-
-# RowParallelLinear
-raw_model = model.llm_engine.workers[0].model.model
-target_layers = [l.mlp.down_proj for l in raw_model.layers]
-
-
-examples = torch.rand((10, 13824), dtype=torch.float16).to(0)
-#examples = torch.rand((10, 11008), dtype=torch.float16).to(0)
-
-examples = {i: torch.load('/tmp/layers.{}.mlp.down_proj.torch'.format(i))[0].to(0) for i in range(0, 40)}
-
 
 @torch.inference_mode()
 def forward_example(layer, examples):
      return layer.forward(examples)[0]
 
 
-def get_quant_layer(gptq_tensors, N):
+def get_quant_layer(gptq_tensors, N, name='down_proj'):
     assert 0 <= N <= 39
-    qweight = gptq_tensors['model.layers.{}.mlp.down_proj.qweight'.format(N)]
-    g_idx = gptq_tensors['model.layers.{}.mlp.down_proj.g_idx'.format(N)]
-    qzeros = gptq_tensors['model.layers.{}.mlp.down_proj.qzeros'.format(N)]
-    scales = gptq_tensors['model.layers.{}.mlp.down_proj.scales'.format(N)]
+    qweight = gptq_tensors['model.layers.{}.mlp.{}.qweight'.format(N, name)]
+    g_idx = gptq_tensors['model.layers.{}.mlp.{}.g_idx'.format(N, name)]
+    qzeros = gptq_tensors['model.layers.{}.mlp.{}.qzeros'.format(N, name)]
+    scales = gptq_tensors['model.layers.{}.mlp.{}.scales'.format(N, name)]
     return QuantLinear(qweight, qzeros, scales, g_idx, None, 4, 128)
 
 
-print('how did we do?')
-for layer in range(40):
-    print('#### layer', layer, '####')
-    exs = examples[layer][0, :]
+def compare_raw_modules(target_layers, quant_layers, examples):
+    print('how did we do?')
+    for layer in range(40):
+        print('#### layer', layer, '####')
+        exs = examples[layer][0, :]
 
-    target = forward_example(target_layers[layer], exs)
-    found = get_quant_layer(gptq_tensors, layer).to(0).forward(exs)
-    
-    # added an extra None to make compatible. what is going on here?
-    if len(found) > 1:
-        found = found[0]
+        target = forward_example(target_layers[layer], exs)
+        found = get_quant_layer(gptq_tensors, layer).to(0).forward(exs)
+        
+        # added an extra None to make compatible. what is going on here?
+        if len(found) > 1:
+            found = found[0]
 
-    diff = target - found
+        diff = target - found
 
-    print('mean diff', diff.abs().mean().cpu().item())
-    print('max diff', diff.abs().max().cpu().item())
-    print('raw', diff.abs().cpu())
-    print('target', target.cpu())
-    print('found', found.cpu())
-    print()
+        print('mean diff', diff.abs().mean().cpu().item())
+        print('max diff', diff.abs().max().cpu().item())
+        print('raw', diff.abs().cpu())
+        print('target', target.cpu())
+        print('found', found.cpu())
+        print()
 
 
 def save_tensors(module, inputs, output, name):
@@ -131,14 +116,20 @@ def add_save_tensor_hook(raw_model):
             layer.register_forward_hook(fn)
 
 
-def merge_quantised_layers(raw_model, gptq_tensors):
+def merge_down_proj_layers(raw_model, gptq_tensors):
+    print('quantising mlp.down_proj....')
     for pos in range(0, 40):
         name = 'model.layers.{}.mlp.down_proj'.format(pos)
         #print('replacing layer', name)
-        quant_layer = get_quant_layer(gptq_tensors, pos).to(0)
+        quant_layer = get_quant_layer(gptq_tensors, pos, name='down_proj').to(0)
         parent = '.'.join(name.split('.')[1:-1])
         raw_model.get_submodule(parent).down_proj = quant_layer
     return raw_model
+
+
+def merge_up_gate_proj_layers(raw_model, gptq_tensors):
+    print('quantising mlp.up_proj and mlp.gate_proj....')
+    pass
 
 
 @torch.inference_mode()
@@ -162,17 +153,36 @@ def print_example_responses(model):
         print('duration', duration)
         print()
 
-print('#### BEFORE ####')
-#print_example_responses(model)
 
-print()
+if __name__ == '__main__':
+    model = get_basic_model()
+    raw_model = model.llm_engine.workers[0].model.model
 
-gb_in_bytes = 1024 ** 3
-print('MEMORY BEFORE', calculate_memory_usage(model.llm_engine.workers[0].model) / gb_in_bytes)
-merge_quantised_layers(raw_model, gptq_tensors)
-print('MEMORY AFTER', calculate_memory_usage(model.llm_engine.workers[0].model) / gb_in_bytes)
+    #target_layers = [l.mlp.down_proj for l in raw_model.layers]
+    #examples = {i: torch.load('/tmp/layers.{}.mlp.down_proj.torch'.format(i))[0].to(0) for i in range(0, 40)}
 
-print()
+    print('loading the GPTQ weights')
+    print('loading', QUANTISED_WEIGHTS)
+    gptq_tensors = load_file(QUANTISED_WEIGHTS)
 
-print('#### AFTER ####')
-print_example_responses(model)
+    print('#### BEFORE ####')
+    print_example_responses(model)
+
+    print()
+
+    gb_in_bytes = 1024 ** 3
+    before = calculate_memory_usage(model.llm_engine.workers[0].model) / gb_in_bytes
+    print('MEMORY BEFORE (GB)', before)
+
+    print('quantising layers')
+    merge_down_proj_layers(raw_model, gptq_tensors)
+    merge_up_gate_proj_layers(raw_model, gptq_tensors)
+
+    after = calculate_memory_usage(model.llm_engine.workers[0].model) / gb_in_bytes
+    print('MEMORY AFTER (GB)', after)
+    print('% decreases in memory', '{:.4f}'.format(100 * (before - after) / before))
+
+    print()
+
+    print('#### AFTER ####')
+    print_example_responses(model)

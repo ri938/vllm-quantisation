@@ -91,7 +91,9 @@ class Autotuner(triton.KernelInterface):
                 kernel_call, percentiles=(0.5, 0.2, 0.8), rep=40
             )
         #except triton.compiler.OutOfResources:
-        except Exception:
+        #except Exception as ex:
+        except IOError as ex:
+            print('exception compilation', str(ex))
             return (float("inf"), float("inf"), float("inf"))
 
     def run(self, *args, **kwargs):
