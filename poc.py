@@ -173,12 +173,12 @@ def print_example_responses(model):
 def test_response(model, line):
     print('input:', line)
     start = time.time()
-    params = SamplingParams(max_tokens=128, logprobs=10)
-    resp = model.generate(line, params, use_tqdm=False)[0].outputs[0]
+    params = SamplingParams(n=1, max_tokens=128, logprobs=10)
+    resp = model.generate(line, params, use_tqdm=False)[0].outputs
     duration = time.time() - start
-    num_new_tokens = len(resp.token_ids)
-    print('output:', resp.text)
-    print('token / second', num_new_tokens / duration)
+    num_new_tokens = [len(r.token_ids) for r in resp]
+    print('output:', [r.text for r in resp])
+    print('token / second', max(num_new_tokens) / duration)
     print('duration', duration)
 
 
