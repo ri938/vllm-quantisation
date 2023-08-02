@@ -8,9 +8,13 @@ from vllm.model_executor.models import llama
 from vllm import LLM, SamplingParams
 from vllm.model_executor.parallel_utils import parallel_state
 from vllm.model_executor.layers.gptq import QuantLinear
+from vllm.model_executor.layers.exllama import Ex4bitLinear, SuperLayer
 from functools import partial
 import torch
 import time
+
+from vllm.model_executor.layers.exllama import create_exllama_buffers, set_device
+from torch.profiler import profile, record_function, ProfilerActivity
 
 
 # original huggingface weights
@@ -20,6 +24,10 @@ WEIGHTS_PATH = '/mnt/models/Wizard-Vicuna-13B-Uncensored-HF'
 filename = 'Wizard-Vicuna-13B-Uncensored-GPTQ-4bit-g128.safetensors'
 folder = '/mnt/pvc/Wizard-Vicuna-13B-Uncensored-GPTQ-4bit-g128'
 QUANTISED_WEIGHTS = os.path.join(folder, filename)
+
+PROFILE = False
+
+EXLLAMA = True
 
 
 def get_raw_model():
@@ -60,13 +68,34 @@ def forward_example(layer, examples):
      return layer.forward(examples)[0]
 
 
+def get_linear(qweight, qzeros, scales, g_idx):
+    if EXLLAMA:
+        qweight = qweight.to(0)
+        qzeros = qzeros.to(0)
+        scales = scales.to(0)
+        g_idx = g_idx.to(0)
+        #layer = Ex4bitLinear(qweight, qzeros, scales, g_idx, None, 4, 128)
+        layer = SuperLayer(qweight, qzeros, scales, g_idx)
+    else:
+        layer = QuantLinear(qweight, qzeros, scales, g_idx, None, 4, 128).to(0)
+
+    return layer
+
+
+def initialise_exllama():
+    # initialising exllama buffers
+    print('initialising exllama')
+    set_device(torch.device('cuda:0'))
+    create_exllama_buffers()
+
+
 def get_quant_layer(gptq_tensors, N, name):
     assert 0 <= N <= 39
     qweight = gptq_tensors['model.layers.{}.{}.qweight'.format(N, name)]
     g_idx = gptq_tensors['model.layers.{}.{}.g_idx'.format(N, name)]
     qzeros = gptq_tensors['model.layers.{}.{}.qzeros'.format(N, name)]
     scales = gptq_tensors['model.layers.{}.{}.scales'.format(N, name)]
-    return QuantLinear(qweight, qzeros, scales, g_idx, None, 4, 128)
+    return get_linear(qweight, qzeros, scales, g_idx)
 
 
 def get_multiple_quant_layer(gptq_tensors, N, names):
@@ -84,7 +113,7 @@ def get_multiple_quant_layer(gptq_tensors, N, names):
     for item in g_idxs[1:]:
         torch.testing.assert_close(item, g_idxs[0])
 
-    return QuantLinear(qweight, qzeros, scales, g_idxs[0], None, 4, 128)
+    return get_linear(qweight, qzeros, scales, g_idxs[0])
 
 
 def compare_raw_modules(target_layers, quant_layers, examples):
@@ -94,7 +123,7 @@ def compare_raw_modules(target_layers, quant_layers, examples):
         exs = examples[layer][0, :]
 
         target = forward_example(target_layers[layer], exs)
-        found = get_quant_layer(gptq_tensors, layer).to(0).forward(exs)
+        found = get_quant_layer(gptq_tensors, layer).forward(exs)
         
         # added an extra None to make compatible. what is going on here?
         if len(found) > 1:
@@ -138,7 +167,7 @@ def quantise_multiple_layers(raw_model, gptq_tensors, names, output_name):
     print('quantising {} to {}...'.format(','.join(names), output_name))
     for pos in range(0, 40):
         name = 'model.layers.{}.{}'.format(pos, output_name)
-        quant_layer = get_multiple_quant_layer(gptq_tensors, pos, names).to(0)
+        quant_layer = get_multiple_quant_layer(gptq_tensors, pos, names)
         parent = '.'.join(name.split('.')[1:-1])
         key = output_name.split('.')[-1]
         setattr(raw_model.get_submodule(parent), key, quant_layer)
@@ -149,7 +178,7 @@ def quantise_single_layer(raw_model, gptq_tensors, name):
     print('quantising {}....'.format(name))
     for pos in range(0, 40):
         target_name = 'model.layers.{}.{}'.format(pos, name)
-        quant_layer = get_quant_layer(gptq_tensors, pos, name=name).to(0)
+        quant_layer = get_quant_layer(gptq_tensors, pos, name=name)
         parent = '.'.join(target_name.split('.')[1:-1])
         key = name.split('.')[-1]
         setattr(raw_model.get_submodule(parent), key, quant_layer)
@@ -165,7 +194,14 @@ def print_example_responses(model):
     ]
 
     for line in example_inputs:
-        test_response(model, line)
+        if PROFILE:
+            with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True) as prof:
+                with record_function("model_inference"):
+                    test_response(model, line)
+            averages = prof.key_averages(group_by_input_shape=True)
+            print(averages.table(sort_by="cuda_time_total", row_limit=50))
+        else:
+            test_response(model, line)
         print()
 
 
@@ -182,27 +218,15 @@ def test_response(model, line):
     print('duration', duration)
 
 
-if __name__ == '__main__':
-    model = get_basic_model()
-    raw_model = model.llm_engine.workers[0].model.model
-
-    #target_layers = [l.mlp.down_proj for l in raw_model.layers]
-    #examples = {i: torch.load('/tmp/layers.{}.mlp.down_proj.torch'.format(i))[0].to(0) for i in range(0, 40)}
-
+def quantise_layers(raw_model):
     print('loading the GPTQ weights')
     print('loading', QUANTISED_WEIGHTS)
     gptq_tensors = load_file(QUANTISED_WEIGHTS)
 
-    print('#### BEFORE ####')
-    #print_example_responses(model)
-
-    print()
-
     gb_in_bytes = 1024 ** 3
-    before = calculate_memory_usage(model.llm_engine.workers[0].model) / gb_in_bytes
+    before = calculate_memory_usage(raw_model) / gb_in_bytes
     print('MEMORY BEFORE (GB)', before)
 
-    print('#### quantising layers ####')
     quantise_single_layer(raw_model, gptq_tensors, 'mlp.down_proj')
 
     quantise_multiple_layers(
@@ -221,13 +245,20 @@ if __name__ == '__main__':
         'self_attn.qkv_proj'
     )
 
-    print(raw_model)
-
     after = calculate_memory_usage(model.llm_engine.workers[0].model) / gb_in_bytes
     print('MEMORY AFTER (GB)', after)
     print('% decreases in memory', '{:.4f}'.format(100 * (before - after) / before))
 
-    print()
+
+if __name__ == '__main__':
+    model = get_basic_model()
+    raw_model = model.llm_engine.workers[0].model.model
+
+    quantise_layers(raw_model)
+    print(raw_model)
+
+    if EXLLAMA:
+        initialise_exllama()
 
     print('#### AFTER ####')
     print_example_responses(model)

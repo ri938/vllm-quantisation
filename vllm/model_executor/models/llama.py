@@ -315,5 +315,5 @@ class LlamaForCausalLM(nn.Module):
                                          self._row_parallel_weights,
                                          tensor_model_parallel_rank)
 
-        quantise.quantise_layers(self.model)
-        print('model:', self.model)
+        #quantise.quantise_layers(self.model)
+        #print('model:', self.model)
