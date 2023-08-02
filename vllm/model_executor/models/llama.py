@@ -45,6 +45,8 @@ from vllm.sequence import SequenceOutputs
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
+from vllm.model_executor.models import quantise
+
 
 class LlamaMLP(nn.Module):
 
@@ -312,3 +314,6 @@ class LlamaForCausalLM(nn.Module):
                                          self._column_parallel_weights,
                                          self._row_parallel_weights,
                                          tensor_model_parallel_rank)
+
+        quantise.quantise_layers(self.model)
+        print('model:', self.model)
