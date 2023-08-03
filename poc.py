@@ -26,6 +26,7 @@ folder = '/mnt/pvc/Wizard-Vicuna-13B-Uncensored-GPTQ-4bit-g128'
 QUANTISED_WEIGHTS = os.path.join(folder, filename)
 
 PROFILE = False
+PROFILE_STACKTRACE = False
 
 EXLLAMA = True
 
@@ -200,6 +201,17 @@ def print_example_responses(model):
                     test_response(model, line)
             averages = prof.key_averages(group_by_input_shape=True)
             print(averages.table(sort_by="cuda_time_total", row_limit=50))
+        elif PROFILE_STACKTRACE:
+            # to allow viewing with tensorboard
+            print('saving detailed profiler')
+            prof = torch.profiler.profile(
+                #schedule=torch.profiler.schedule(),
+                on_trace_ready=torch.profiler.tensorboard_trace_handler('./profiler'),
+                record_shapes=True,
+                with_stack=True)
+            prof.start()
+            test_response(model, line)
+            prof.stop()
         else:
             test_response(model, line)
         print()

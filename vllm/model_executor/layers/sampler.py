@@ -11,7 +11,27 @@ from vllm.model_executor.parallel_utils.tensor_parallel import (
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import SequenceOutputs
 
+import time
+
 _SAMPLING_EPS = 1e-5
+
+
+from cProfile import Profile
+from functools import wraps
+from pstats import Stats
+
+
+def profile(func):
+    @wraps(func)
+    def wrapped_func(*args, **kwargs):
+        profiler = Profile()
+        out = profiler.runcall(func, *args, **kwargs)
+        stats = Stats(profiler)
+        stats.strip_dirs()
+        stats.sort_stats('cumulative')
+        stats.print_stats()
+        return out
+    return wrapped_func
 
 
 class Sampler(nn.Module):
@@ -39,6 +59,11 @@ class Sampler(nn.Module):
         hidden_states: torch.Tensor,
         input_metadata: InputMetadata,
     ) -> Dict[int, SequenceOutputs]:
+
+        s = time.time()
+        torch.cuda.synchronize()
+        print('synchronize', time.time() - s)
+
         # Get the hidden states that we use for sampling.
         hidden_states = _prune_hidden_states(hidden_states, input_metadata)
 
@@ -92,12 +117,19 @@ def _prune_hidden_states(
 ) -> torch.Tensor:
     start_idx = 0
     last_token_indicies: List[int] = []
+
     for prompt_len in input_metadata.prompt_lens:
         last_token_indicies.append(start_idx + prompt_len - 1)
         start_idx += prompt_len
+
     last_token_indicies.extend(
         range(start_idx, start_idx + input_metadata.num_generation_tokens))
-    return hidden_states[last_token_indicies]
+
+    s = time.time()
+    res = hidden_states[last_token_indicies]
+    print('hidden states', time.time() - s)
+
+    return res
 
 
 def _get_penalties(

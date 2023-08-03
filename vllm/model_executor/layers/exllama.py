@@ -64,6 +64,7 @@ def create_exllama_buffers():
     matmul_recons_thd = 8
     matmul_fused_remap = False
     matmul_no_half2 = False
+
     set_tuning_params(matmul_recons_thd, matmul_fused_remap, matmul_no_half2)
 
     TEMP_STATE, TEMP_DQ = temp_state, temp_dq
@@ -91,7 +92,7 @@ class Ex4bitLinear():
         self.scales = scales
         self.g_idx = g_idx.cpu() if g_idx is not None else None
         self.bias = bias if bias is not None else None
-
+        
         if self.g_idx is not None and (
             (self.g_idx == 0).all()
             or torch.equal(
@@ -144,4 +145,5 @@ class Ex4bitLinear():
 
         if self.bias is not None:
             out.add_(self.bias)
+
         return out, None

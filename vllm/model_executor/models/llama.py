@@ -43,6 +43,7 @@ from vllm.model_executor.parallel_utils.tensor_parallel import (
     VocabParallelEmbedding, ColumnParallelLinear, RowParallelLinear)
 from vllm.sequence import SequenceOutputs
 
+import time
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 from vllm.model_executor.models import quantise
@@ -244,10 +245,16 @@ class LlamaForCausalLM(nn.Module):
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> Dict[int, SequenceOutputs]:
+        start = time.time()
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    input_metadata, cache_events)
+        print('model', time.time() - start)
+
+        start = time.time()
         next_tokens = self.sampler(self.lm_head.weight, hidden_states,
                                    input_metadata)
+        print('sampler', time.time() - start)
+
         return next_tokens
 
     _column_parallel_weights = [
