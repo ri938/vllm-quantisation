@@ -60,9 +60,9 @@ class Sampler(nn.Module):
         input_metadata: InputMetadata,
     ) -> Dict[int, SequenceOutputs]:
 
-        s = time.time()
-        torch.cuda.synchronize()
-        print('synchronize', time.time() - s)
+        #s = time.time()
+        #torch.cuda.synchronize()
+        #print('synchronize', time.time() - s)
 
         # Get the hidden states that we use for sampling.
         hidden_states = _prune_hidden_states(hidden_states, input_metadata)

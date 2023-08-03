@@ -61,7 +61,8 @@ def create_exllama_buffers():
     # This temp_dq buffer is required to dequantize weights when using cuBLAS, typically for the prefill.
     prepare_buffers(DEVICE, temp_state, temp_dq)
 
-    matmul_recons_thd = 8
+    #matmul_recons_thd = 8
+    matmul_recons_thd = 0
     matmul_fused_remap = False
     matmul_no_half2 = False
 

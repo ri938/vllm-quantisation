@@ -5,7 +5,8 @@
 #include "../cuda_compat.cuh"
 #include "../cuda_buffers.cuh"
 
-const int THREADS_X = 32;       // Block size and thread count along columns in w and out
+// increased from 32 due to better occupancy rate
+const int THREADS_X = 128;       // Block size and thread count along columns in w and out
 const int THREADS_Y = 1;        // Block size and thread count along rows in x and out
 
 typedef void (*fp_q4_matmul_kernel)
