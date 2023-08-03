@@ -125,9 +125,9 @@ def _prune_hidden_states(
     last_token_indicies.extend(
         range(start_idx, start_idx + input_metadata.num_generation_tokens))
 
-    s = time.time()
+    #s = time.time()
     res = hidden_states[last_token_indicies]
-    print('hidden states', time.time() - s)
+    #print('hidden states', time.time() - s)
 
     return res
 
