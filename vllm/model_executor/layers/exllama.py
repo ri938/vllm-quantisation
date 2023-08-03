@@ -1,5 +1,6 @@
 import torch
 from exllama_kernels import make_q4, q4_matmul, prepare_buffers, set_tuning_params
+import time
 
 # Dummy tensor to pass instead of g_idx since there is no way to pass "None" to a C++ extension
 none_tensor = torch.empty((1, 1), device="meta")
@@ -18,6 +19,7 @@ def ext_q4_matmul(x, q4, q4_width):
     x = x.view(-1, x.shape[-1])
     output = torch.empty((x.shape[0], q4_width), dtype=torch.float16, device=x.device)
 
+    #print(x.shape)
     q4_matmul(x, q4, output)
 
     return output.view(outshape)
@@ -61,8 +63,8 @@ def create_exllama_buffers():
     # This temp_dq buffer is required to dequantize weights when using cuBLAS, typically for the prefill.
     prepare_buffers(DEVICE, temp_state, temp_dq)
 
-    matmul_recons_thd = 8
-    #matmul_recons_thd = 0
+    #matmul_recons_thd = 8
+    matmul_recons_thd = 20
     matmul_fused_remap = False
     matmul_no_half2 = False
 
@@ -142,7 +144,10 @@ class Ex4bitLinear():
             ACT_ORDER = True
 
     def forward(self, x):
+        #s = time.time()
         out = ext_q4_matmul(x, self.q4, self.width)
+        #print('q4 matmul', time.time() - s)
+        #print('shape', x.shape, self.width)
 
         if self.bias is not None:
             out.add_(self.bias)

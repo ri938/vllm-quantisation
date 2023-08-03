@@ -245,10 +245,16 @@ class LlamaForCausalLM(nn.Module):
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> Dict[int, SequenceOutputs]:
+        #s = time.time()
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    input_metadata, cache_events)
+        #print('model', time.time() - s)
+
+        #s = time.time()
         next_tokens = self.sampler(self.lm_head.weight, hidden_states,
                                    input_metadata)
+        #print('sampler', time.time() - s)
+
         return next_tokens
 
     _column_parallel_weights = [
