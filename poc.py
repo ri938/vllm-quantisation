@@ -3,6 +3,7 @@ from transformers import LlamaConfig
 
 import os
 from safetensors.torch import load_file
+import json
 
 from vllm.model_executor.models import llama
 from vllm import LLM, SamplingParams
@@ -186,13 +187,16 @@ def quantise_single_layer(raw_model, gptq_tensors, name):
     return raw_model
 
 
-def print_example_responses(model):
-    example_inputs = [
-        'AI is going to',
-        'The capitol of France is',
-        'Now this is a story all about how, my',
-        'This is a story about a frog who',
-    ]
+def print_example_responses(model, realistic=False):
+    if realistic:
+        example_inputs = [s['model_input'][-2048:] for s in read_jsonlines()]
+    else:
+        example_inputs = [
+            'AI is going to',
+            'The capitol of France is',
+            'Now this is a story all about how, my',
+            'This is a story about a frog who',
+        ]
 
     for line in example_inputs:
         if PROFILE:
@@ -262,6 +266,15 @@ def quantise_layers(raw_model):
     print('% decreases in memory', '{:.4f}'.format(100 * (before - after) / before))
 
 
+def read_jsonlines():
+    path = 'example_requests.json'
+    lines = []
+    with open(path, 'r') as f:
+        for line in f:
+            lines.append(json.loads(line))
+    return lines
+
+
 if __name__ == '__main__':
     model = get_basic_model()
     raw_model = model.llm_engine.workers[0].model.model
@@ -273,4 +286,4 @@ if __name__ == '__main__':
         initialise_exllama()
 
     print('#### AFTER ####')
-    print_example_responses(model)
+    print_example_responses(model, realistic=True)
