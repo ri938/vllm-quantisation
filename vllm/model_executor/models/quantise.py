@@ -11,17 +11,25 @@ import torch
 import time
 
 
+USE_30B = True
 # original huggingface weights
-WEIGHTS_PATH = '/home/fsuser/dummy/Wizard-Vicuna-13B-Uncensored-HF'
 
-# quantised weights
-filename = 'Wizard-Vicuna-13B-Uncensored-GPTQ-4bit-g128.safetensors'
-folder = '/home/fsuser/dummy/Wizard-Vicuna-13B-Uncensored-GPTQ-4bit-g128'
-QUANTISED_WEIGHTS = os.path.join(folder, filename)
+if USE_30B:
+    WEIGHTS_PATH = '/home/fsuser/dummy/Wizard-Vicuna-30B-Uncensored-fp16'
+    filename = 'combined.safetensors'
+    folder = '/home/fsuser/dummy/Wizard-Vicuna-30B-Uncensored-GPTQ-Act-Order-False'
+    QUANTISED_WEIGHTS = os.path.join(folder, filename)
+    NUM_LAYERS = 60
+else:
+    WEIGHTS_PATH = '/home/fsuser/dummy/Wizard-Vicuna-13B-Uncensored-HF'
+    filename = 'Wizard-Vicuna-13B-Uncensored-GPTQ-4bit-g128.safetensors'
+    folder = '/home/fsuser/dummy/Wizard-Vicuna-13B-Uncensored-GPTQ-4bit-g128'
+    QUANTISED_WEIGHTS = os.path.join(folder, filename)
+    NUM_LAYERS = 40
 
 
 def get_quant_layer(gptq_tensors, N, name):
-    assert 0 <= N <= 39
+    assert 0 <= N <= NUM_LAYERS
     qweight = gptq_tensors['model.layers.{}.{}.qweight'.format(N, name)]
     g_idx = gptq_tensors['model.layers.{}.{}.g_idx'.format(N, name)]
     qzeros = gptq_tensors['model.layers.{}.{}.qzeros'.format(N, name)]
@@ -30,7 +38,7 @@ def get_quant_layer(gptq_tensors, N, name):
 
 
 def get_multiple_quant_layer(gptq_tensors, N, names):
-    assert 0 <= N <= 39
+    assert 0 <= N <= NUM_LAYERS
 
     qweights = [gptq_tensors['model.layers.{}.{}.qweight'.format(N, name)] for name in names]
     qzeros = [gptq_tensors['model.layers.{}.{}.qzeros'.format(N, name)] for name in names]
@@ -57,7 +65,7 @@ def calculate_memory_usage(model):
 
 def quantise_multiple_layers(raw_model, gptq_tensors, names, output_name):
     print('quantising {} to {}...'.format(','.join(names), output_name))
-    for pos in range(0, 40):
+    for pos in range(0, NUM_LAYERS):
         name = 'model.layers.{}.{}'.format(pos, output_name)
         quant_layer = get_multiple_quant_layer(gptq_tensors, pos, names).to(0)
         parent = '.'.join(name.split('.')[1:-1])
@@ -68,7 +76,7 @@ def quantise_multiple_layers(raw_model, gptq_tensors, names, output_name):
 
 def quantise_single_layer(raw_model, gptq_tensors, name):
     print('quantising {}....'.format(name))
-    for pos in range(0, 40):
+    for pos in range(0, NUM_LAYERS):
         target_name = 'model.layers.{}.{}'.format(pos, name)
         quant_layer = get_quant_layer(gptq_tensors, pos, name=name).to(0)
         parent = '.'.join(target_name.split('.')[1:-1])
