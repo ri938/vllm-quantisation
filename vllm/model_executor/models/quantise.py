@@ -12,11 +12,11 @@ import time
 
 
 # original huggingface weights
-WEIGHTS_PATH = '/mnt/models/Wizard-Vicuna-13B-Uncensored-HF'
+WEIGHTS_PATH = '/home/fsuser/dummy/Wizard-Vicuna-13B-Uncensored-HF'
 
 # quantised weights
 filename = 'Wizard-Vicuna-13B-Uncensored-GPTQ-4bit-g128.safetensors'
-folder = '/mnt/pvc/Wizard-Vicuna-13B-Uncensored-GPTQ-4bit-g128'
+folder = '/home/fsuser/dummy/Wizard-Vicuna-13B-Uncensored-GPTQ-4bit-g128'
 QUANTISED_WEIGHTS = os.path.join(folder, filename)
 
 

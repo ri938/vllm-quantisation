@@ -25,6 +25,7 @@ The input of the model is flattened to a 1D tensor of tokens. The model uses
 InputMetadata to extract the original 2D shape of the input.
 """
 from typing import Dict, List, Optional, Tuple
+import os
 
 import torch
 from torch import nn
@@ -48,6 +49,9 @@ KVCache = Tuple[torch.Tensor, torch.Tensor]
 from vllm.model_executor.models import quantise
 
 
+QUANTIZE = bool(os.environ.get('QUANTIZE', True))
+
+
 class LlamaMLP(nn.Module):
 
     def __init__(
@@ -57,16 +61,23 @@ class LlamaMLP(nn.Module):
         hidden_act: str,
     ):
         super().__init__()
-        self.gate_up_proj = ColumnParallelLinear(hidden_size,
-                                                 2 * intermediate_size,
-                                                 bias=False,
-                                                 gather_output=False,
-                                                 perform_initialization=False)
-        self.down_proj = RowParallelLinear(intermediate_size,
-                                           hidden_size,
-                                           bias=False,
-                                           input_is_parallel=True,
-                                           perform_initialization=False)
+
+        # hack to reduce peak memory use
+        if not QUANTIZE:
+            self.gate_up_proj = ColumnParallelLinear(hidden_size,
+                                                     2 * intermediate_size,
+                                                     bias=False,
+                                                     gather_output=False,
+                                                     perform_initialization=False)
+            self.down_proj = RowParallelLinear(intermediate_size,
+                                               hidden_size,
+                                               bias=False,
+                                               input_is_parallel=True,
+                                               perform_initialization=False)
+        else:
+            self.gate_up_proj = None
+            self.down_proj = None
+
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
@@ -97,20 +108,25 @@ class LlamaAttention(nn.Module):
         self.head_dim = hidden_size // self.total_num_heads
         self.scaling = self.head_dim**-0.5
 
-        self.qkv_proj = ColumnParallelLinear(
-            hidden_size,
-            3 * self.total_num_heads * self.head_dim,
-            bias=False,
-            gather_output=False,
-            perform_initialization=False,
-        )
-        self.o_proj = RowParallelLinear(
-            self.total_num_heads * self.head_dim,
-            hidden_size,
-            bias=False,
-            input_is_parallel=True,
-            perform_initialization=False,
-        )
+        if not QUANTIZE:
+            self.qkv_proj = ColumnParallelLinear(
+                hidden_size,
+                3 * self.total_num_heads * self.head_dim,
+                bias=False,
+                gather_output=False,
+                perform_initialization=False,
+            )
+            self.o_proj = RowParallelLinear(
+                self.total_num_heads * self.head_dim,
+                hidden_size,
+                bias=False,
+                input_is_parallel=True,
+                perform_initialization=False,
+            )
+        else:
+            self.qkv_proj = None
+            self.o_proj = None
+
         self.attn = PagedAttentionWithRoPE(self.num_heads,
                                            self.head_dim,
                                            self.scaling,
@@ -271,12 +287,21 @@ class LlamaForCausalLM(nn.Module):
                 continue
 
             #print('loading weights:', name)
+            linear_layers = [
+                'q_proj', 'k_proj', 'v_proj', 'o_proj',
+                'gate_proj', 'up_proj', 'down_proj',
+            ]
+
+            is_linear_layer = any([l in name for l in linear_layers])
+            if QUANTIZE and is_linear_layer:
+                continue
 
             is_attention_weight = False
             for stride_id, att_weight_name in enumerate(
                 ["q_proj", "k_proj", "v_proj"]):
                 if att_weight_name not in name:
                     continue
+
                 param = state_dict[name.replace(att_weight_name, "qkv_proj")]
                 shard_size = param.shape[0] // 3
                 loaded_weight = loaded_weight[
@@ -315,5 +340,7 @@ class LlamaForCausalLM(nn.Module):
                                          self._row_parallel_weights,
                                          tensor_model_parallel_rank)
 
-        quantise.quantise_layers(self.model)
-        print('model:', self.model)
+        if QUANTIZE:
+            print('loading quantized layers')
+            quantise.quantise_layers(self.model)
+            print('model:', self.model)
