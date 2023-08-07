@@ -26,6 +26,7 @@ InputMetadata to extract the original 2D shape of the input.
 """
 from typing import Dict, List, Optional, Tuple
 
+import os
 import torch
 from torch import nn
 from transformers import LlamaConfig
@@ -322,5 +323,6 @@ class LlamaForCausalLM(nn.Module):
                                          self._row_parallel_weights,
                                          tensor_model_parallel_rank)
 
-        quantise.quantise_layers(self.model)
-        print('model:', self.model)
+        if not bool(os.environ.get('FP16')):
+            quantise.quantise_layers(self.model)
+            print('model:', self.model)
