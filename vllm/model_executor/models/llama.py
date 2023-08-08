@@ -49,6 +49,8 @@ KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 from vllm.model_executor.models import quantise
 
+from transformers import activations
+
 
 class LlamaMLP(nn.Module):
 
@@ -59,6 +61,7 @@ class LlamaMLP(nn.Module):
         hidden_act: str,
     ):
         super().__init__()
+        """
         self.gate_up_proj = ColumnParallelLinear(hidden_size,
                                                  2 * intermediate_size,
                                                  bias=False,
@@ -69,16 +72,22 @@ class LlamaMLP(nn.Module):
                                            bias=False,
                                            input_is_parallel=True,
                                            perform_initialization=False)
+        """
+
+        # AWQ quantisation uses seperate layers (TODO: does it matter?)
+        self.gate_proj = None
+        self.up_proj = None
+        self.down_proj = None
+
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
-        self.act_fn = SiluAndMul()
+
+        #self.act_fn = SiluAndMul()
+        self.act_fn = activations.SiLUActivation()
 
     def forward(self, x):
-        gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
-        x, _ = self.down_proj(x)
-        return x
+        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
 
 class LlamaAttention(nn.Module):
@@ -279,6 +288,13 @@ class LlamaForCausalLM(nn.Module):
                 continue
 
             #print('loading weights:', name)
+            linear_layers = [
+                #'q_proj', 'k_prok', 'v_proj', 'o_proj',
+                'gate_proj', 'down_proj', 'up_proj'
+            ]
+
+            if any([l in name for l in linear_layers]):
+                continue
 
             is_attention_weight = False
             for stride_id, att_weight_name in enumerate(
@@ -326,3 +342,5 @@ class LlamaForCausalLM(nn.Module):
         if not bool(os.environ.get('FP16')):
             quantise.quantise_layers(self.model)
             print('model:', self.model)
+
+        import pdb; pdb.set_trace()
