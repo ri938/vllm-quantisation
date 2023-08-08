@@ -342,5 +342,3 @@ class LlamaForCausalLM(nn.Module):
         if not bool(os.environ.get('FP16')):
             quantise.quantise_layers(self.model)
             print('model:', self.model)
-
-        import pdb; pdb.set_trace()

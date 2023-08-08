@@ -30,7 +30,7 @@ def save_file_hook(module, input, output, name, folder):
 
 def add_hooks_to_layers(hook_fn, layer_names, model):
     for name, layer in model.named_modules():
-        match = any([l in name for l in layer_names])
+        match = any([name.endswith(l) for l in layer_names])
         if match:
             fn = partial(hook_fn, name=name)
             layer.register_forward_hook(fn)
