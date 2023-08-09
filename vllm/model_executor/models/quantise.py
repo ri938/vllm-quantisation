@@ -13,11 +13,18 @@ import torch
 import time
 
 
-QUANTISED_WEIGHTS = '/code/quant_cache/wizard-vicuna-13b-w4-g128-awq.safetensors'
+USE_30B = bool(os.environ.get('USE_30B', False))
+
+if USE_30B:
+    QUANTISED_WEIGHTS = '/code/quant_cache/wizard-vicuna-30b-w4-g128-awq.safetensors'
+    NUM_LAYERS = 80
+else:
+    QUANTISED_WEIGHTS = '/code/quant_cache/wizard-vicuna-13b-w4-g128-awq.safetensors'
+    NUM_LAYERS = 40
 
 
 def get_quant_layer(gptq_tensors, N, name):
-    assert 0 <= N <= 39
+    assert 0 <= N <= NUM_LAYERS
     qweight = gptq_tensors['model.layers.{}.{}.qweight'.format(N, name)]
     qzeros = gptq_tensors['model.layers.{}.{}.qzeros'.format(N, name)]
     scales = gptq_tensors['model.layers.{}.{}.scales'.format(N, name)]
@@ -29,7 +36,7 @@ def get_quant_layer(gptq_tensors, N, name):
 
 
 def get_multiple_quant_layer(gptq_tensors, N, names):
-    assert 0 <= N <= 39
+    assert 0 <= N <= NUM_LAYERS
 
     qweights = [gptq_tensors['model.layers.{}.{}.qweight'.format(N, name)] for name in names]
     qzeros = [gptq_tensors['model.layers.{}.{}.qzeros'.format(N, name)] for name in names]
@@ -52,7 +59,7 @@ def calculate_memory_usage(model):
 
 def quantise_multiple_layers(raw_model, gptq_tensors, names, output_name):
     print('quantising {} to {}...'.format(','.join(names), output_name))
-    for pos in range(0, 40):
+    for pos in range(0, NUM_LAYERS):
         name = 'model.layers.{}.{}'.format(pos, output_name)
         quant_layer = get_multiple_quant_layer(gptq_tensors, pos, names)
         parent = '.'.join(name.split('.')[1:-1])
@@ -63,7 +70,7 @@ def quantise_multiple_layers(raw_model, gptq_tensors, names, output_name):
 
 def quantise_single_layer(raw_model, gptq_tensors, name):
     print('quantising {}....'.format(name))
-    for pos in range(0, 40):
+    for pos in range(0, NUM_LAYERS):
         target_name = 'model.layers.{}.{}'.format(pos, name)
         quant_layer = get_quant_layer(gptq_tensors, pos, name=name)
         parent = '.'.join(target_name.split('.')[1:-1])
@@ -74,7 +81,7 @@ def quantise_single_layer(raw_model, gptq_tensors, name):
 
 def load_weights(raw_model, gptq_tensors, name):
     print('load weights {}....'.format(name))
-    for pos in range(0, 40):
+    for pos in range(0, NUM_LAYERS):
         target_name = 'model.layers.{}.{}'.format(pos, name)
         weights = gptq_tensors[target_name + '.weight']
         path = '.'.join(target_name.split('.')[1:])
@@ -98,10 +105,10 @@ def quantise_layers(raw_model):
     load_weights(raw_model, gptq_tensors, 'input_layernorm')
     load_weights(raw_model, gptq_tensors, 'post_attention_layernorm')
 
-    #quantise_single_layer(raw_model, gptq_tensors, 'self_attn.o_proj')
-    #quantise_single_layer(raw_model, gptq_tensors, 'self_attn.k_proj')
-    #quantise_single_layer(raw_model, gptq_tensors, 'self_attn.v_proj')
-    #quantise_single_layer(raw_model, gptq_tensors, 'self_attn.q_proj')
+    quantise_single_layer(raw_model, gptq_tensors, 'self_attn.o_proj')
+    quantise_single_layer(raw_model, gptq_tensors, 'self_attn.k_proj')
+    quantise_single_layer(raw_model, gptq_tensors, 'self_attn.v_proj')
+    quantise_single_layer(raw_model, gptq_tensors, 'self_attn.q_proj')
 
     after = calculate_memory_usage(raw_model) / gb_in_bytes
     print('MEMORY AFTER (GB)', after)

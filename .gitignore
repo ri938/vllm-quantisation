@@ -7,6 +7,7 @@ __pycache__/
 *.so
 *.swo
 *.swp
+*.swk
 
 # Distribution / packaging
 .Python
