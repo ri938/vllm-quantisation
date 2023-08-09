@@ -72,6 +72,16 @@ def quantise_single_layer(raw_model, gptq_tensors, name):
     return raw_model
 
 
+def load_weights(raw_model, gptq_tensors, name):
+    print('load weights {}....'.format(name))
+    for pos in range(0, 40):
+        target_name = 'model.layers.{}.{}'.format(pos, name)
+        weights = gptq_tensors[target_name + '.weight']
+        path = '.'.join(target_name.split('.')[1:])
+        setattr(raw_model.get_submodule(path), 'weight', torch.nn.Parameter(weights))
+    return raw_model
+
+
 def quantise_layers(raw_model):
     print('loading the GPTQ weights')
     print('loading', QUANTISED_WEIGHTS)
@@ -84,6 +94,9 @@ def quantise_layers(raw_model):
     quantise_single_layer(raw_model, gptq_tensors, 'mlp.down_proj')
     quantise_single_layer(raw_model, gptq_tensors, 'mlp.up_proj')
     quantise_single_layer(raw_model, gptq_tensors, 'mlp.gate_proj')
+
+    load_weights(raw_model, gptq_tensors, 'input_layernorm')
+    load_weights(raw_model, gptq_tensors, 'post_attention_layernorm')
 
     #quantise_single_layer(raw_model, gptq_tensors, 'self_attn.o_proj')
     #quantise_single_layer(raw_model, gptq_tensors, 'self_attn.k_proj')
