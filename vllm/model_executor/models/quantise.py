@@ -16,10 +16,10 @@ import time
 USE_30B = bool(os.environ.get('USE_30B', False))
 
 if USE_30B:
-    QUANTISED_WEIGHTS = '/code/quant_cache/wizard-vicuna-30b-w4-g128-awq.safetensors'
-    NUM_LAYERS = 80
+    QUANTISED_WEIGHTS = '/home/fsuser/workspace/wizard-vicuna-30b-uncensored-awq-4bit-g128/wizard-vicuna-30b-w4-g128-awq.safetensors'
+    NUM_LAYERS = 60
 else:
-    QUANTISED_WEIGHTS = '/code/quant_cache/wizard-vicuna-13b-w4-g128-awq.safetensors'
+    QUANTISED_WEIGHTS = '/home/fsuser/workspace/wizard-vicuna-13b-uncensored-awq-4bit-g128/wizard-vicuna-13b-w4-g128-awq.safetensors'
     NUM_LAYERS = 40
 
 
