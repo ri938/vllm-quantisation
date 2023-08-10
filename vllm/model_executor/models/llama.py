@@ -29,12 +29,11 @@ from typing import Dict, List, Optional, Tuple
 import os
 import torch
 from torch import nn
-from transformers import LlamaConfig
+from transformers import LlamaConfig, activations
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
-#from vllm.model_executor.layers.layernorm import LlamaRMSNorm as RMSNorm
 
 from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
 from vllm.model_executor.layers.sampler import Sampler
@@ -46,14 +45,24 @@ from vllm.model_executor.parallel_utils.tensor_parallel import (
     VocabParallelEmbedding, ColumnParallelLinear, RowParallelLinear)
 from vllm.sequence import SequenceOutputs
 
-import time
+from vllm.awq.quantize import qmodule
+
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
-from vllm.model_executor.models import quantise
-
-from transformers import activations
 
 USE_FP16 = bool(os.environ.get('FP16'))
+
+
+def get_quant_layer(in_features, out_features):
+    layer = qmodule.WQLinear(
+        w_bit=4,
+        group_size=128,
+        in_features=in_features,
+        out_features=out_features,
+        bias=None,
+        dev=0
+    )
+    return layer
 
 
 class LlamaMLP(nn.Module):
@@ -66,39 +75,51 @@ class LlamaMLP(nn.Module):
     ):
         super().__init__()
 
-        if USE_FP16:
-            self.gate_up_proj = ColumnParallelLinear(hidden_size,
-                                                     2 * intermediate_size,
-                                                     bias=False,
-                                                     gather_output=False,
-                                                     perform_initialization=False)
-            self.down_proj = RowParallelLinear(intermediate_size,
-                                               hidden_size,
-                                               bias=False,
-                                               input_is_parallel=True,
-                                               perform_initialization=False)
-        else:
-            self.gate_proj = None
-            self.up_proj = None
-            self.down_proj = None
+        self.gate_up_proj = ColumnParallelLinear(hidden_size,
+                                                 2 * intermediate_size,
+                                                 bias=False,
+                                                 gather_output=False,
+                                                 perform_initialization=False)
+        self.down_proj = RowParallelLinear(intermediate_size,
+                                           hidden_size,
+                                           bias=False,
+                                           input_is_parallel=True,
+                                           perform_initialization=False)
 
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
 
-        if USE_FP16:
-            self.act_fn = SiluAndMul()
-        else:
-            self.act_fn = activations.SiLUActivation()
+        self.act_fn = SiluAndMul()
 
     def forward(self, x):
-        if USE_FP16:
-            gate_up, _ = self.gate_up_proj(x)
-            x = self.act_fn(gate_up)
-            x, _ = self.down_proj(x)
-            return x
-        else:
-             return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        gate_up, _ = self.gate_up_proj(x)
+        x = self.act_fn(gate_up)
+        x, _ = self.down_proj(x)
+        return x
+
+
+class QuantLlamaMLP(nn.Module):
+
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
+    ):
+        super().__init__()
+        self.gate_proj = get_quant_layer(hidden_size, intermediate_size)
+        self.up_proj = get_quant_layer(hidden_size, intermediate_size)
+        self.down_proj = get_quant_layer(intermediate_size, hidden_size)
+
+        if hidden_act != "silu":
+            raise ValueError(f"Unsupported activation: {hidden_act}. "
+                             "Only silu is supported for now.")
+
+        self.act_fn = activations.SiLUActivation()
+
+    def forward(self, x):
+        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
 
 class LlamaAttention(nn.Module):
@@ -119,26 +140,20 @@ class LlamaAttention(nn.Module):
         self.head_dim = hidden_size // self.total_num_heads
         self.scaling = self.head_dim**-0.5
 
-        if USE_FP16:
-            self.qkv_proj = ColumnParallelLinear(
-                hidden_size,
-                3 * self.total_num_heads * self.head_dim,
-                bias=False,
-                gather_output=False,
-                perform_initialization=False,
-            )
-            self.o_proj = RowParallelLinear(
-                self.total_num_heads * self.head_dim,
-                hidden_size,
-                bias=False,
-                input_is_parallel=True,
-                perform_initialization=False,
-            )
-        else:
-            self.q_proj = None
-            self.k_proj = None
-            self.v_proj = None
-            self.o_proj = None
+        self.qkv_proj = ColumnParallelLinear(
+            hidden_size,
+            3 * self.total_num_heads * self.head_dim,
+            bias=False,
+            gather_output=False,
+            perform_initialization=False,
+        )
+        self.o_proj = RowParallelLinear(
+            self.total_num_heads * self.head_dim,
+            hidden_size,
+            bias=False,
+            input_is_parallel=True,
+            perform_initialization=False,
+        )
 
         self.attn = PagedAttentionWithRoPE(self.num_heads,
                                            self.head_dim,
@@ -153,25 +168,59 @@ class LlamaAttention(nn.Module):
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
-
-        if USE_FP16:
-            qkv, _ = self.qkv_proj(hidden_states)
-            q, k, v = qkv.chunk(chunks=3, dim=-1)
-        else:
-            q = self.q_proj(hidden_states)
-            k = self.k_proj(hidden_states)
-            v = self.v_proj(hidden_states)
-
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v = qkv.chunk(chunks=3, dim=-1)
         k_cache, v_cache = kv_cache
         attn_output = self.attn(positions, q, k, v, k_cache, v_cache,
                                 input_metadata, cache_event)
-
-        if USE_FP16:
-            output, _ = self.o_proj(attn_output)
-        else:
-            output = self.o_proj(attn_output)
-
+        output, _ = self.o_proj(attn_output)
         return output
+
+
+class QuantLlamaAttention(nn.Module):
+
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+    ):
+        super().__init__()
+        self.hidden_size = hidden_size
+        tensor_model_parallel_world_size = (
+            get_tensor_model_parallel_world_size())
+        self.total_num_heads = num_heads
+        assert self.total_num_heads % tensor_model_parallel_world_size == 0
+        self.num_heads = (self.total_num_heads //
+                          tensor_model_parallel_world_size)
+        self.head_dim = hidden_size // self.total_num_heads
+        self.scaling = self.head_dim**-0.5
+
+        intermediate_size = self.total_num_heads * self.head_dim
+        self.q_proj = get_quant_layer(hidden_size, intermediate_size)
+        self.k_proj = get_quant_layer(hidden_size, intermediate_size)
+        self.v_proj = get_quant_layer(hidden_size, intermediate_size)
+        self.o_proj = get_quant_layer(intermediate_size, hidden_size)
+
+        self.attn = PagedAttentionWithRoPE(self.num_heads,
+                                           self.head_dim,
+                                           self.scaling,
+                                           rotary_dim=self.head_dim)
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        kv_cache: KVCache,
+        input_metadata: InputMetadata,
+        cache_event: Optional[torch.cuda.Event],
+    ) -> torch.Tensor:
+        q = self.q_proj(hidden_states)
+        k = self.k_proj(hidden_states)
+        v = self.v_proj(hidden_states)
+        k_cache, v_cache = kv_cache
+        attn_output = self.attn(positions, q, k, v, k_cache, v_cache,
+                                input_metadata, cache_event)
+        return self.o_proj(attn_output)
 
 
 class LlamaDecoderLayer(nn.Module):
@@ -179,15 +228,20 @@ class LlamaDecoderLayer(nn.Module):
     def __init__(self, config: LlamaConfig):
         super().__init__()
         self.hidden_size = config.hidden_size
-        self.self_attn = LlamaAttention(
+
+        attn_cls = LlamaAttention if USE_FP16 else QuantLlamaAttention
+        self.self_attn = attn_cls(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
         )
-        self.mlp = LlamaMLP(
+
+        mlp_cls = LlamaMLP if USE_FP16 else QuantLlamaMLP
+        self.mlp = mlp_cls(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
         )
+
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
@@ -285,16 +339,10 @@ class LlamaForCausalLM(nn.Module):
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> Dict[int, SequenceOutputs]:
-        #s = time.time()
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    input_metadata, cache_events)
-        #print('model', time.time() - s)
-
-        #s = time.time()
         next_tokens = self.sampler(self.lm_head.weight, hidden_states,
                                    input_metadata)
-        #print('sampler', time.time() - s)
-
         return next_tokens
 
     _column_parallel_weights = [
@@ -310,65 +358,51 @@ class LlamaForCausalLM(nn.Module):
         tensor_model_parallel_rank = get_tensor_model_parallel_rank()
         state_dict = self.state_dict()
 
-        print('load weights', tensor_model_parallel_rank)
-
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, use_np_cache):
             if "rotary_emb.inv_freq" in name:
                 continue
 
-            #print('loading weights:', name)
-            linear_layers = [
-                'q_proj', 'k_proj', 'v_proj', 'o_proj',
-                'gate_proj', 'down_proj', 'up_proj'
-            ]
-
-            if any([l in name for l in linear_layers]) and not USE_FP16:
-                continue
-
-            is_attention_weight = False
-            for stride_id, att_weight_name in enumerate(
-                ["q_proj", "k_proj", "v_proj"]):
-                if att_weight_name not in name:
+            if USE_FP16:
+                is_attention_weight = False
+                for stride_id, att_weight_name in enumerate(
+                    ["q_proj", "k_proj", "v_proj"]):
+                    if att_weight_name not in name:
+                        continue
+                    param = state_dict[name.replace(att_weight_name, "qkv_proj")]
+                    shard_size = param.shape[0] // 3
+                    loaded_weight = loaded_weight[
+                        shard_size * tensor_model_parallel_rank:shard_size *
+                        (tensor_model_parallel_rank + 1)]
+                    param_slice = param.data[shard_size * stride_id:shard_size *
+                                             (stride_id + 1)]
+                    assert param_slice.shape == loaded_weight.shape
+                    param_slice.copy_(loaded_weight)
+                    is_attention_weight = True
+                    break
+                if is_attention_weight:
                     continue
-                param = state_dict[name.replace(att_weight_name, "qkv_proj")]
-                shard_size = param.shape[0] // 3
-                loaded_weight = loaded_weight[
-                    shard_size * tensor_model_parallel_rank:shard_size *
-                    (tensor_model_parallel_rank + 1)]
-                param_slice = param.data[shard_size * stride_id:shard_size *
-                                         (stride_id + 1)]
-                assert param_slice.shape == loaded_weight.shape
-                param_slice.copy_(loaded_weight)
-                is_attention_weight = True
-                break
-            if is_attention_weight:
-                continue
 
-            is_gate_up_weight = False
-            for stride_id, weight_name in enumerate(["gate_proj", "up_proj"]):
-                if weight_name not in name:
+                is_gate_up_weight = False
+                for stride_id, weight_name in enumerate(["gate_proj", "up_proj"]):
+                    if weight_name not in name:
+                        continue
+                    param = state_dict[name.replace(weight_name, "gate_up_proj")]
+                    shard_size = param.shape[0] // 2
+                    loaded_weight = loaded_weight[
+                        shard_size * tensor_model_parallel_rank:shard_size *
+                        (tensor_model_parallel_rank + 1)]
+                    param_slice = param.data[shard_size * stride_id:shard_size *
+                                             (stride_id + 1)]
+                    assert param_slice.shape == loaded_weight.shape
+                    param_slice.copy_(loaded_weight)
+                    is_gate_up_weight = True
+                    break
+                if is_gate_up_weight:
                     continue
-                param = state_dict[name.replace(weight_name, "gate_up_proj")]
-                shard_size = param.shape[0] // 2
-                loaded_weight = loaded_weight[
-                    shard_size * tensor_model_parallel_rank:shard_size *
-                    (tensor_model_parallel_rank + 1)]
-                param_slice = param.data[shard_size * stride_id:shard_size *
-                                         (stride_id + 1)]
-                assert param_slice.shape == loaded_weight.shape
-                param_slice.copy_(loaded_weight)
-                is_gate_up_weight = True
-                break
-            if is_gate_up_weight:
-                continue
 
             param = state_dict[name]
             load_tensor_parallel_weights(param, loaded_weight, name,
                                          self._column_parallel_weights,
                                          self._row_parallel_weights,
                                          tensor_model_parallel_rank)
-
-        if not USE_FP16:
-            quantise.quantise_layers(self.model)
-            print('model:', self.model)
