@@ -53,6 +53,8 @@ from vllm.model_executor.models import quantise
 
 from transformers import activations
 
+USE_FP16 = bool(os.environ.get('FP16'))
+
 
 class LlamaMLP(nn.Module):
 
@@ -63,33 +65,40 @@ class LlamaMLP(nn.Module):
         hidden_act: str,
     ):
         super().__init__()
-        """
-        self.gate_up_proj = ColumnParallelLinear(hidden_size,
-                                                 2 * intermediate_size,
-                                                 bias=False,
-                                                 gather_output=False,
-                                                 perform_initialization=False)
-        self.down_proj = RowParallelLinear(intermediate_size,
-                                           hidden_size,
-                                           bias=False,
-                                           input_is_parallel=True,
-                                           perform_initialization=False)
-        """
 
-        # AWQ quantisation uses seperate layers (TODO: does it matter?)
-        self.gate_proj = None
-        self.up_proj = None
-        self.down_proj = None
+        if USE_FP16:
+            self.gate_up_proj = ColumnParallelLinear(hidden_size,
+                                                     2 * intermediate_size,
+                                                     bias=False,
+                                                     gather_output=False,
+                                                     perform_initialization=False)
+            self.down_proj = RowParallelLinear(intermediate_size,
+                                               hidden_size,
+                                               bias=False,
+                                               input_is_parallel=True,
+                                               perform_initialization=False)
+        else:
+            self.gate_proj = None
+            self.up_proj = None
+            self.down_proj = None
 
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
 
-        #self.act_fn = SiluAndMul()
-        self.act_fn = activations.SiLUActivation()
+        if USE_FP16:
+            self.act_fn = SiluAndMul()
+        else:
+            self.act_fn = activations.SiLUActivation()
 
     def forward(self, x):
-        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        if USE_FP16:
+            gate_up, _ = self.gate_up_proj(x)
+            x = self.act_fn(gate_up)
+            x, _ = self.down_proj(x)
+            return x
+        else:
+             return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
 
 class LlamaAttention(nn.Module):
@@ -110,26 +119,26 @@ class LlamaAttention(nn.Module):
         self.head_dim = hidden_size // self.total_num_heads
         self.scaling = self.head_dim**-0.5
 
-        """
-        self.qkv_proj = ColumnParallelLinear(
-            hidden_size,
-            3 * self.total_num_heads * self.head_dim,
-            bias=False,
-            gather_output=False,
-            perform_initialization=False,
-        )
-        self.o_proj = RowParallelLinear(
-            self.total_num_heads * self.head_dim,
-            hidden_size,
-            bias=False,
-            input_is_parallel=True,
-            perform_initialization=False,
-        )
-        """
-        self.q_proj = None
-        self.k_proj = None
-        self.v_proj = None
-        self.o_proj = None
+        if USE_FP16:
+            self.qkv_proj = ColumnParallelLinear(
+                hidden_size,
+                3 * self.total_num_heads * self.head_dim,
+                bias=False,
+                gather_output=False,
+                perform_initialization=False,
+            )
+            self.o_proj = RowParallelLinear(
+                self.total_num_heads * self.head_dim,
+                hidden_size,
+                bias=False,
+                input_is_parallel=True,
+                perform_initialization=False,
+            )
+        else:
+            self.q_proj = None
+            self.k_proj = None
+            self.v_proj = None
+            self.o_proj = None
 
         self.attn = PagedAttentionWithRoPE(self.num_heads,
                                            self.head_dim,
@@ -144,19 +153,23 @@ class LlamaAttention(nn.Module):
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
-        q = self.q_proj(hidden_states)
-        k = self.k_proj(hidden_states)
-        v = self.v_proj(hidden_states)
 
-        #qkv, _ = self.qkv_proj(hidden_states)
-        #q, k, v = qkv.chunk(chunks=3, dim=-1)
+        if USE_FP16:
+            qkv, _ = self.qkv_proj(hidden_states)
+            q, k, v = qkv.chunk(chunks=3, dim=-1)
+        else:
+            q = self.q_proj(hidden_states)
+            k = self.k_proj(hidden_states)
+            v = self.v_proj(hidden_states)
 
         k_cache, v_cache = kv_cache
         attn_output = self.attn(positions, q, k, v, k_cache, v_cache,
                                 input_metadata, cache_event)
 
-        #output, _ = self.o_proj(attn_output)
-        output = self.o_proj(attn_output)
+        if USE_FP16:
+            output, _ = self.o_proj(attn_output)
+        else:
+            output = self.o_proj(attn_output)
 
         return output
 
@@ -310,7 +323,7 @@ class LlamaForCausalLM(nn.Module):
                 'gate_proj', 'down_proj', 'up_proj'
             ]
 
-            if any([l in name for l in linear_layers]):
+            if any([l in name for l in linear_layers]) and not USE_FP16:
                 continue
 
             is_attention_weight = False
@@ -356,6 +369,6 @@ class LlamaForCausalLM(nn.Module):
                                          self._row_parallel_weights,
                                          tensor_model_parallel_rank)
 
-        if not bool(os.environ.get('FP16')):
+        if not USE_FP16:
             quantise.quantise_layers(self.model)
             print('model:', self.model)
