@@ -11,10 +11,9 @@
 
 
 #include <torch/extension.h>
-#include "gemm_cuda.h"
-#include "dequantize.cuh"
 #include <cuda_fp16.h>
 #include <c10/cuda/CUDAGuard.h>
+#include "dequantize.cuh"
 
 
 // Pack two half values.
