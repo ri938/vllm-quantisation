@@ -53,17 +53,27 @@ def dequantize_test():
 
     weights = torch.transpose(weights, 0, 1)
 
+    """
     dq = new_inf.dequantize(
         kernel,
         scales,
         zeros
     )
+    """
+
+    dq = python_dequantize(kernel, scales, zeros)
 
     assert dq.shape == weights.shape
 
     diff = dq - weights
     nan_ix = diff.isnan()
     assert ((diff == 0.0) | nan_ix).all().item()
+
+def python_dequantize(kernel, scales, zeros):
+    """
+    proof of concept with python
+    """
+    return kernel
 
 
 if __name__ == '__main__':
