@@ -41,24 +41,20 @@ def test_file(f, new_kernel):
     nan_ix = diff.isnan()
     #assert ((diff == 0.0) | nan_ix).all().item()
 
-
     max_diff = diff[~nan_ix].abs().double().max()
     mean_diff = diff[~nan_ix].abs().double().mean()
 
-    # this is too leniant -- its broken
+    print('max', max_diff)
+    print('mean', mean_diff)
+
+    # this is too leniant
     match = True
 
     if max_diff.item() > 0.01:
-        print('max', max_diff)
         match = False
-    elif max_diff.item() > 0.001
-        print('max', max_diff)
 
-    if mean_diff.item() > 0.0005:
-        print('mean', mean_diff)
+    assert mean_diff.item() <= 0.001:
         match = False
-    elif mean_diff.item() > 0.0005
-        print('max', max_diff)
 
     return match
 
@@ -71,7 +67,7 @@ def run_test(folder, new_kernel=False):
             print("\033[32mPASS: {}\033[0m".format(f))
         else:
             print("\033[91mFAIL: {}\033[0m".format(f))
-        print()
+
 
 
 def python_impl(inputs, kernel, scales, zeros):
