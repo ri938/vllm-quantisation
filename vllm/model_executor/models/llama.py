@@ -48,6 +48,9 @@ from vllm.awq_quantization import qmodule
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
+import os
+QLAYERS = int(os.environ.get('QLAYERS', -1))
+
 
 class LlamaMLP(nn.Module):
 
@@ -246,13 +249,13 @@ class QuantLlamaMLP(nn.Module):
 
 class LlamaDecoderLayer(nn.Module):
 
-    def __init__(self, config: LlamaConfig, quant_config: QuantizationConfig):
+    def __init__(self, config: LlamaConfig, quant_config: QuantizationConfig, position: int):
         super().__init__()
         self.hidden_size = config.hidden_size
 
         use_quantized_layers = quant_config and quant_config.method is not None
 
-        if use_quantized_layers:
+        if use_quantized_layers and position >= (config.num_hidden_layers - QLAYERS):
             self.self_attn = QuantLlamaAttention(
                 hidden_size=self.hidden_size,
                 num_heads=config.num_attention_heads,
@@ -324,8 +327,8 @@ class LlamaModel(nn.Module):
             vocab_size, config.hidden_size, perform_initialization=False)
 
         self.layers = nn.ModuleList([
-            LlamaDecoderLayer(config, quant_config)
-            for _ in range(config.num_hidden_layers)
+            LlamaDecoderLayer(config, quant_config, position)
+            for position in range(config.num_hidden_layers)
         ])
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -413,8 +416,35 @@ class LlamaForCausalLM(nn.Module):
 
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, use_np_cache):
+            print('processing', name)
             if "rotary_emb.inv_freq" in name:
                 continue
+
+            is_choice_layer = any([l in name for l in ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj', 'post_attention_layernorm', 'input_layernorm']])
+
+            should_quant = False
+            is_quantised_layer = False
+
+            if name.startswith('quant.'):
+                is_quantised_layer = True
+                if not is_choice_layer:
+                    print('skipping', name)
+                    continue
+                name = name.replace('quant.', '')
+
+            if name.startswith('model.layers.'):
+                layer_num = int(name.split('.')[2])
+                if layer_num >= (self.config.num_hidden_layers - QLAYERS):
+                    should_quant = True
+
+            if is_choice_layer:
+                if should_quant and not is_quantised_layer:
+                    print('skipping', name)
+                    continue
+
+                if is_quantised_layer and not should_quant:
+                    print('skipping', name)
+                    continue
 
             if "embed_tokens" in name or "lm_head" in name:
                 param = state_dict[name]
@@ -426,7 +456,7 @@ class LlamaForCausalLM(nn.Module):
                 extra_rows = extra_rows.to(loaded_weight)
                 loaded_weight = torch.cat([loaded_weight, extra_rows], dim=0)
 
-            is_quantized = self.quant_config is not None
+            is_quantized = self.quant_config is not None and should_quant
 
             is_attention_weight = False
             for weight_name, shard_size, offset in attention_weight_specs:
@@ -486,3 +516,13 @@ class LlamaForCausalLM(nn.Module):
                                          self._column_parallel_weights,
                                          self._row_parallel_weights,
                                          tensor_model_parallel_rank)
+
+        print(self.model)
+        print('memory usage', get_memory_usage_bytes(self.model) / (1024 ** 3))
+
+
+def get_memory_usage_bytes(model):
+    # doesnt include the peak usage for the forward pass
+    mem_params = sum([param.nelement()*param.element_size() for param in model.parameters()])
+    mem_bufs = sum([buf.nelement()*buf.element_size() for buf in model.buffers()])
+    return mem_params + mem_bufs
