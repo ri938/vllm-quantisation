@@ -35,14 +35,41 @@ def test_file(f, new_kernel):
 
 
 def run_test(folder, new_kernel=False):
-    files = glob.glob(os.path.join(ROOT, folder, '*.pt'))
+    files = glob.glob(os.path.join(folder, '*.pt'))
     for f in tqdm(files):
         test_file(f, new_kernel)
         print("\033[32mPASS: {}\033[0m".format(f))
 
 
+def dequantize_test():
+    print('running dequantize test')
+    path = os.path.join(ROOT, 'dequantize.pt')
+    data = torch.load(path)
+
+    weights = data['weights']
+    scales = data['scales']
+    zeros = data['zeros']
+    kernel = data['qweight']
+
+    weights = torch.transpose(weights, 0, 1)
+
+    dq = new_inf.dequantize(
+        kernel,
+        scales,
+        zeros
+    )
+
+    assert dq.shape == weights.shape
+
+    diff = dq - weights
+    nan_ix = diff.isnan()
+    assert ((diff == 0.0) | nan_ix).all().item()
+
+
 if __name__ == '__main__':
-    folders = os.listdir(ROOT)
+    dequantize_test()
+
+    folders = glob.glob(ROOT + '/regression_*')
     for new_kernel in [False, True]:
         print('using new kernel: {}'.format(new_kernel))
         for f in folders:

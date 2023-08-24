@@ -30,6 +30,29 @@ __pack_half2(const half x, const half y) {
 // zeros: IC // G, OC // 8 [int32] -> cast to IC // G, OC [uint4b]
 // assume that batch_size < 16 for now
 
+
+torch::Tensor dequantize(
+    torch::Tensor _kernel,
+    torch::Tensor _scaling_factors,
+    torch::Tensor _zeros)
+{
+    int num_in_feats = _kernel.size(0);
+    int num_in_channels = _kernel.size(1) * 8;
+    int num_packed_columns = _kernel.size(1);
+
+    auto options = torch::TensorOptions().dtype(torch::kHalf).device(_kernel.device());
+    at::Tensor dq = torch::zeros({num_in_feats, num_in_channels}, options);
+
+    for (int row = 0; row < num_in_feats; row++) {
+         for (int column = 0; column < num_packed_columns; column++) {
+
+         }
+    }
+
+    return dq;
+}
+
+   
 torch::Tensor gemm_forward_cuda(
     torch::Tensor _in_feats,
     torch::Tensor _kernel,
@@ -58,9 +81,20 @@ torch::Tensor gemm_forward_cuda(
     if (num_out_channels % 8 != 0)
         throw std::invalid_argument("OC is not multiple of pack_num = 8");
     if (group_size % 32 != 0)
-	      throw std::invalid_argument("Group size should be a multiple of 32");
+	throw std::invalid_argument("Group size should be a multiple of 32");
     if (num_out_channels % group_size != 0)
         throw std::invalid_argument("OC is not multiple of Group size");
+
+    // level 1: we just want to dequantize the kernel
+
+    torch::Tensor dq = dequantize(
+	_kernel,
+	_scaling_factors,
+	_zeros
+    );
+
+    // level 2: use standard libraries in order to matrix multiply it
+    // level 3: optimise
 
     return _out_feats.sum(0);
 }
