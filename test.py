@@ -21,6 +21,9 @@ def test_file(f, new_kernel):
     qweight = data['qweight']
     zeros = data['zeros']
 
+    #if f.endswith('data_842.pt'):
+    #    import pdb; pdb.set_trace()
+
     if new_kernel:
         """
         result = new_inf.gemm_forward_cuda(
@@ -41,6 +44,7 @@ def test_file(f, new_kernel):
     nan_ix = diff.isnan()
     #assert ((diff == 0.0) | nan_ix).all().item()
 
+    prop_diff = diff[~nan_ix] / outs[~nan_ix]
 
     max_diff = diff[~nan_ix].abs().double().max()
     mean_diff = diff[~nan_ix].abs().double().mean()
@@ -51,14 +55,17 @@ def test_file(f, new_kernel):
     if max_diff.item() > 0.01:
         print('max', max_diff)
         match = False
-    elif max_diff.item() > 0.001
+    elif max_diff.item() > 0.001:
         print('max', max_diff)
 
     if mean_diff.item() > 0.0005:
         print('mean', mean_diff)
         match = False
-    elif mean_diff.item() > 0.0005
+    elif mean_diff.item() > 0.0005:
         print('max', max_diff)
+
+    #if new_kernel:
+    #import pdb; pdb.set_trace()
 
     return match
 
@@ -115,8 +122,8 @@ def dequantize_test():
     return dq
 
 
-def unpack(matrix):
-    output = torch.zeros((matrix.shape[0], matrix.shape[1] * 8), dtype=torch.int32)
+def unpack(matrix, dtype):
+    output = torch.zeros((matrix.shape[0], matrix.shape[1] * 8), dtype=dtype)
 
     order_map = [0, 2, 4, 6, 1, 3, 5, 7]
 
@@ -143,7 +150,7 @@ def python_dequantize(kernel, scales, zeros):
 
     in_feats, in_channels = kernel.shape[0], kernel.shape[1] * 8
 
-    new_zeros = unpack(zeros)
+    new_zeros = unpack(zeros, dtype=torch.int32)
     assert new_zeros.shape[1] == in_channels
     assert new_zeros.shape[0] * 128 == in_feats
 
@@ -151,7 +158,7 @@ def python_dequantize(kernel, scales, zeros):
 
     scale_zeros = new_zeros.to(0) * scales
 
-    new_kernel = unpack(kernel)
+    new_kernel = unpack(kernel, dtype=torch.int32)
     assert new_kernel.shape == torch.Size([in_feats, in_channels])
 
     output = []
