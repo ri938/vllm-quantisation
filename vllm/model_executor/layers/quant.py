@@ -3,6 +3,8 @@
 import torch
 import torch.nn as nn
 
+import random
+
 
 try:
     import awq_inference_engine
@@ -95,6 +97,23 @@ class AWQLinear(nn.Module):
             self.qzeros,
             8
         )
+
+        match = random.randint(0, 100) == 0
+        #match = False
+
+        if match:
+            pos = random.randint(0, 1000)
+            data = {
+                'input': x.reshape(-1, x.shape[-1]),
+                'output': out,
+                'scales': self.scales,
+                'qweight': self.qweight,
+                'zeros': self.qzeros,
+            }
+            path = '/code/regression/data_{}.pt'.format(pos)
+            print(path)
+
+            torch.save(data, path)
 
         out = out + self.bias if self.bias is not None else out
         return out.reshape(out_shape)
