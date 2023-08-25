@@ -1,0 +1,65 @@
+
+can we "recover" estimate of usable weights from the kernel, scales, zeros
+
+How AWQ quantization works:
+
+# run AWQ search (optional; we provided the pre-computed results)
+python -m awq.entry --model_path /dataset/llama-hf/$MODEL \
+    --w_bit 4 --q_group_size 128 \
+    --run_awq --dump_awq awq_cache/$MODEL-w4-g128.pt
+
+
+ROOM for experimentation:
+* use large and more varied samples in order to quantize
+* when searching for the best scales just run it with smaller granularity
+  n_grid
+* can do a massive search overnight
+
+
+1.  loads the original model using HF / fp16
+
+calls run_awq(model, n_samples=128, seqlen=512)
+
+its trying to save "scales" and "clips"
+it quantises each layer seperately and independently
+
+* loads a dataset (the pile)
+     - small sample
+
+* loops through each layer
+     * saves output of each layer as input to the next layer stage in the loop
+     * for each sub-linear layer it saves its input in a dictionary
+     auto_scale:
+       auto_scale_block
+        (pops use_cache from kwargs)
+        calls _auto_get_scale on all the linear layers (hard coded for each module type)
+      
+     mse_range:
+
+
+# generate real quantized weights (w4)
+python -m awq.entry --model_path /dataset/llama-hf/$MODEL \
+    --w_bit 4 --q_group_size 128 \
+    --load_awq awq_cache/$MODEL-w4-g128.pt \
+    --q_backend real --dump_quant quant_cache/$MODEL-w4-g128-awq.pt
+
+1. load the original model using HF
+
+2. torch loads the results from part 1 and applies them
+
+3. then applies the pseudo quantization method
+
+4. then finall creates a linear layer from this
+
+5. finally dumps it out once its as linear layers
+
+
+-- the weights have been pseudo quantized
+(but this restores it back again after clamping it)
+so just loses precision
+
+-- the weights have had the scales and zeros applied to them
+   but we can undo this
+
+
+quantisation only useful if its faster to do inference... which its currently not anyway
