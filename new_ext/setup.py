@@ -5,7 +5,8 @@ from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CppExtensio
 
 extra_compile_args = {
     "cxx": ["-g", "-O3", "-fopenmp", "-lgomp", "-std=c++17"],
-    "nvcc": ["-O3", "-std=c++17"],
+    #"nvcc": ["-O3", "-std=c++17"],
+    "nvcc": ["-O3", "-std=c++17", "-lineinfo"],
 }
 
 setup(

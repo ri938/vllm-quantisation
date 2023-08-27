@@ -6,11 +6,15 @@ import mock
 from torch.nn import functional as F
 import torch
 
+from safetensors.torch import load_file
 from vllm.model_executor.layers import quant
 import awq_inference_engine
 import new_inf
 
 from enum import Enum
+
+import exllama
+
 
 ROOT = '/code/test_layer'
 
@@ -20,9 +24,33 @@ class Target(Enum):
     python = 2
     new = 3
     python_new_dequant = 4
+    exllama = 5
 
 
-def test_file(f, target_kernel):
+def load_original_layer(name):
+    for filename in glob.glob('/mnt/pvc/Wizard-Vicuna-13B-Uncensored-HF/*.safetensors'):
+        data = load_file(filename)
+        if name in data:
+            return data[name]
+    raise ValueError('unable to find weight {}'.format(name))
+
+
+def find_matching_source_weights(source, ins, zeros):
+    name = None
+    for key, value in source.items():
+        if not key.endswith('zeros'):
+            continue
+        if value.shape == zeros.shape:
+            if (value.to(0) == zeros.to(0)).all():
+                name = key
+                break
+    if name is None:
+        # e.g merged laers gate_up
+        print('unable to find source weights')
+    return name
+
+
+def test_file(f, target_kernel, source=None):
     """
     We are performing a linear layer on the same
     quantized data so these results should be very close
@@ -36,6 +64,15 @@ def test_file(f, target_kernel):
     scales = data['scales']
     qweight = data['qweight']
     zeros = data['zeros']
+
+    # find the source weights (useful for getting a real comparison)
+    if source is not None:
+        name = find_matching_source_weights(source, ins, zeros)
+        if name is None:
+            source = None
+        else:
+            weights = load_original_layer(name.replace('.qzeros', '.weight'))
+            expected = F.linear(ins.to(0), weights.to(0))
 
     if target_kernel == Target.original:
         result = awq_inference_engine.gemm_forward_cuda(
@@ -53,10 +90,22 @@ def test_file(f, target_kernel):
         result = python_impl_cuda_dequant(
             ins, qweight, scales, zeros
         )
+    elif target_kernel == Target.exllama:
+        result = python_exllam_impl(
+            ins, qweight, scales, zeros
+        )
     else:
         raise NotImplementedError('unknown kernel {}'.format(target_kernel))
 
     assert result.shape == outs.shape
+
+    if source is not None:
+        assert expected.shape == outs.shape
+        diff = result - expected
+        nan_ix = diff.isnan()
+        mean_diff = diff[~nan_ix].abs().double().mean()
+        max_diff = diff[~nan_ix].abs().double().max()
+        print('against source mean {} max {}'.format(mean_diff, max_diff))
 
     diff = result - outs
     nan_ix = diff.isnan()
@@ -82,16 +131,18 @@ def test_file(f, target_kernel):
     elif mean_diff.item() > 0.00005:
         print('mean', mean_diff)
 
+    #import pdb; pdb.set_trace()
+
     #if new_kernel:
     #import pdb; pdb.set_trace()
 
     return match
 
 
-def run_test(folder, new_kernel=False):
+def run_test(folder, new_kernel=False, source=None):
     files = glob.glob(os.path.join(folder, '*.pt'))
     for f in tqdm(files):
-        match = test_file(f, new_kernel)
+        match = test_file(f, new_kernel, source=source)
         if match:
             print("\033[32mPASS: {}\033[0m".format(f))
         else:
@@ -107,6 +158,8 @@ def python_impl(inputs, kernel, scales, zeros):
 
 def python_impl_cuda_dequant(inputs, kernel, scales, zeros):
     weights = new_inf.dequantize(kernel, scales, zeros)
+    #import pdb; pdb.set_trace()
+    weights = torch.transpose(weights, 0, 1)
     res = F.linear(inputs.to(0), weights.to(0))
     return res
 
@@ -159,6 +212,21 @@ def dequantize_test():
     return dq
 
 
+def python_exllam_impl(ins, qweight, scales, zeros):
+    """Its just not the same shape: qweights is reshaped """
+    gptq = repack_gptq(qweight)
+
+    none_tensor = torch.empty((1, 1), device = "meta")
+
+    import pdb; pdb.set_trace()
+    q4 = exllama.make_q4(gptq, zeros, scales, none_tensor, 0)
+
+    q4_width = qweight.shape[1] * 8  # ?
+    output = torch.empty((ins.shape[0], q4_width), dtype=torch.float16, device=ins.device)
+    exllama.q4_matmul(ins.to(0), q4, output)
+    return output
+
+
 def unpack(matrix, dtype=torch.int32):
     output = torch.zeros((matrix.shape[0], matrix.shape[1] * 8), dtype=dtype)
 
@@ -180,6 +248,25 @@ def pack(matrix, dtype=torch.int32):
         order_map = [0, 2, 4, 6, 1, 3, 5, 7]
         for i in range(pack_num):
             matrix_col = matrix[:, col * pack_num + order_map[i]]
+            output[:, col] |= matrix_col << (i * 4)
+
+    return output
+
+
+def repack_gptq(matrix, dtype=torch.int32):
+    unpacked = unpack(matrix).to(0)
+    repacked = pack_gptq(unpacked)
+    return repacked
+
+
+def pack_gptq(matrix, dtype=torch.int32):
+    output = torch.zeros((matrix.shape[0], matrix.shape[1]), dtype=dtype).to(0)
+
+    pack_num = 32 // 4
+
+    for col in range(matrix.shape[1] // pack_num):
+        for i in range(pack_num):
+            matrix_col = unpacked[:, col * pack_num + i]
             output[:, col] |= matrix_col << (i * 4)
 
     return output
@@ -216,15 +303,18 @@ def python_dequantize(kernel, scales, zeros):
 if __name__ == '__main__':
     #dequantize_test()
     test_cases = [
-        Target.original,
         Target.python_new_dequant,
+        Target.original,
         Target.python,
-        Target.new
+        Target.new,
+        #Target.exllama,
     ]
+
+    source = load_file('/code/wizard-vicuna-13b-uncensored-awq-4bit-g128/wizard-vicuna-13b-w4-g128-awq.safetensors')
 
     folders = glob.glob(ROOT + '/regression_*')
     for new_kernel in test_cases:
         print('using new kernel: {}'.format(new_kernel))
         for f in folders:
-            run_test(f, new_kernel)
+            run_test(f, new_kernel, source)
         print()
