@@ -35,7 +35,7 @@ __global__ void _dequant(
     for (int row = 0; row < in_channels; row++) {
          for (int column = 0; column < num_packed_channels; column++) {
 	    for (int pos = 0; pos < 8; pos++) {
-		half* s_item = scales + row / 128 * num_output_channels + column * 8 + pos;
+		half* s_item = scales + row / 128 * num_output_channels + column * 8 + order_map[pos];
 		int* z_item = zeros + row / 128 * num_output_channels / 8 + column;
                 int* w_item = kernel + row * num_output_channels / 8 + column;
 

@@ -131,7 +131,6 @@ def test_file(f, target_kernel, source=None):
     elif mean_diff.item() > 0.00005:
         print('mean', mean_diff)
 
-    #import pdb; pdb.set_trace()
 
     #if new_kernel:
     #import pdb; pdb.set_trace()
@@ -157,6 +156,7 @@ def python_impl(inputs, kernel, scales, zeros):
 
 
 def python_impl_cuda_dequant(inputs, kernel, scales, zeros):
+    #alt_weights = python_dequantize(kernel, scales, zeros)
     weights = new_inf.dequantize(kernel, scales, zeros)
     #import pdb; pdb.set_trace()
     weights = torch.transpose(weights, 0, 1)
@@ -306,7 +306,7 @@ if __name__ == '__main__':
         Target.python_new_dequant,
         Target.original,
         Target.python,
-        Target.new,
+        #Target.new,
         #Target.exllama,
     ]
 
