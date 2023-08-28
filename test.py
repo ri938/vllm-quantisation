@@ -87,6 +87,7 @@ def test_file(f, target_kernel, source=None):
         result = new_inf.gemm_forward_cuda(
             ins, qweight, scales, zeros
         )
+        import pdb ; pdb.set_trace()
     elif target_kernel == Target.python_new_dequant:
         result = python_impl_cuda_dequant(
             ins, qweight, scales, zeros

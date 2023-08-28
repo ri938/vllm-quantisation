@@ -139,9 +139,11 @@ __global__ void _quant_mm(
        	int* zeros,
        	half* out_feats,
        	int in_channels,
-       	int num_packed_channels
+       	int num_packed_channels,
+	int num_in_feats
 ) {
     /*
+      in_feats M, IC
       scales IC // 128, OC [float16]
       zeros  IC // 128, OC // 8 [int32]
       kernel IC, OC // 8 [int32]
@@ -149,31 +151,44 @@ __global__ void _quant_mm(
       IC = IF
     */
 
-    int num_output_channels = num_packed_channels * 8;
     int order_map[] = {0, 2, 4, 6, 1, 3, 5, 7}; 
 
-    int idx = blockIdx.x * 512 + threadIdx.y * 32 + threadIdx.x;
+    const int blocksize = 32;
 
-    int column = idx % num_packed_channels;
-    int row = idx / num_packed_channels;
+    //const int x = blockIdx.x * blocksize + (threadIdx.x / blocksize);
+    const int x = blockIdx.x;
+    const int y = blockIdx.y * blocksize + (threadIdx.x % blocksize);
 
-    if (idx < num_packed_channels * in_channels) {
-        int* z_item = zeros + row / 128 * num_output_channels / 8 + column;
-        int* w_item = kernel + row * num_output_channels / 8 + column;
+    const int num_output_channels = num_packed_channels * 8;
 
-        for (int pos = 0; pos < 8; pos++) {
-	    half* s_item = scales + row / 128 * num_output_channels + column * 8 + order_map[pos];
+    if (x < num_in_feats && y < num_packed_channels) {
+        half tmp_results[8] = {__float2half(0.0)};
 
-	    half zero = __float2half(static_cast<float>((*z_item >> 4 * pos) & 0xf));
-	    half weight = __float2half(static_cast<float>((*w_item >> 4 * pos) & 0xf));
+	for (int shift = 0; shift < in_channels; shift++) {
+	   half* f_item = in_feats + x * in_channels + shift;
+           int* w_item = kernel + shift * num_output_channels / 8 + y;
+           int* z_item = zeros + shift / 128 * num_output_channels / 8 + y;
 
-	    half scaled_zero = __hmul(zero, *s_item);
-	    half dequant = __hsub(__hmul(weight, *s_item), scaled_zero);
+	   for (int pos = 0; pos < 8; pos++) {
+	       half* s_item = scales + shift / 128 * num_output_channels + y * 8 + order_map[pos];
 
-	    half* out_ptr = out_feats + row * num_output_channels + column * 8 + order_map[pos];
-	    *(half*)(out_ptr) = dequant;
+	       half zero = __float2half(static_cast<float>((*z_item >> 4 * pos) & 0xf));
+	       half weight = __float2half(static_cast<float>((*w_item >> 4 * pos) & 0xf));
+
+	       half scaled_zero = __hmul(zero, *s_item);
+	       half dequant = __hsub(__hmul(weight, *s_item), scaled_zero);
+
+	       tmp_results[order_map[pos]] = __hadd(tmp_results[order_map[pos]], dequant);
+	   }
+        }
+
+        for (int pos=0; pos < 8; pos++) {
+	    half* out_ptr = out_feats + x * num_output_channels + y * 8 + pos;
+	    *(half*)(out_ptr) = tmp_results[pos];
+	    printf("x %d y %d pos %d\n", x, y, x * num_output_channels + y * 8 + pos);
         }
     }
+
 }
 
 // feats: M, IC
@@ -204,17 +219,25 @@ torch::Tensor gemm_forward_cuda(
     auto scaling_factors = reinterpret_cast<half*>(_scaling_factors.data_ptr<at::Half>());
     auto zeros = reinterpret_cast<int*>(_zeros.data_ptr<int>());
 
-    if (num_in_channels != _kernel.size(0))
-        throw std::invalid_argument("Kernel and input channels mismatch");
+    if (_in_feats.size(1) != _kernel.size(0))
+        throw std::invalid_argument("Kernel and input channels mismatch dim0");
+    if (_scaling_factors.size(1) != _kernel.size(1) * 8)
+        throw std::invalid_argument("Kernel and scaling factors mismatch dim1");
+
+    if (num_in_channels != _scaling_factors.size(0) * 128)
+        throw std::invalid_argument("Invalid scaling factors size (dim1)");
     if (num_out_channels != _scaling_factors.size(1))
         throw std::invalid_argument("Invalid scaling factors size (dim1)");
+
     if (_zeros.size(0) != _scaling_factors.size(0))
         throw std::invalid_argument("Invalid zeros size (dim0)");
+    if (_zeros.size(1) * 8 != num_out_channels)
+        throw std::invalid_argument("Invalid zeros size (dim1)");
 
-    dim3 threads(32, 16);
-    dim3 blocks((num_in_feats * num_packed_channels + 512 - 1) / 512, 1);
+    dim3 threads(32);
+    dim3 blocks(num_in_feats, (num_packed_channels + 32 - 1) / 32);
 
-    _quant_mm<<<blocks, threads>>>(in_feats, kernel, scaling_factors, zeros, out_feats, num_in_channels, num_packed_channels);
+    _quant_mm<<<blocks, threads>>>(in_feats, kernel, scaling_factors, zeros, out_feats, num_in_channels, num_packed_channels, num_in_feats);
 
     return _out_feats;
 }
