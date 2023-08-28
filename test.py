@@ -2,6 +2,7 @@ from tqdm import tqdm
 import os
 import glob
 import mock
+import time
 
 from torch.nn import functional as F
 import torch
@@ -315,6 +316,8 @@ if __name__ == '__main__':
     folders = glob.glob(ROOT + '/regression_*')
     for new_kernel in test_cases:
         print('using new kernel: {}'.format(new_kernel))
+        start = time.time()
         for f in folders:
             run_test(f, new_kernel, source)
+        print('duration', time.time() - start)
         print()

@@ -62,37 +62,32 @@ __global__ void _dequant(
       kernel IC, OC // 8 [int32]
       output IC, OC
       IC = IF
-
-      threads (64, 1)
-      blocks: whatever is needed
-      X rows Y columns  -- threads should try to read from the same row
-
-      "position" = blockIdx * stride + threadIdx.x
     */
 
     int num_output_channels = num_packed_channels * 8;
     int order_map[] = {0, 2, 4, 6, 1, 3, 5, 7}; 
 
-    int column = threadIdx.x % num_packed_channels;
-    int row = threadIdx.x / num_packed_channels
+    int idx = blockIdx.x * 512 + threadIdx.y * 32 + threadIdx.x;
 
-    for (int row = 0; row < in_channels; row++) {
-         for (int column = 0; column < num_packed_channels; column++) {
-	    for (int pos = 0; pos < 8; pos++) {
-		half* s_item = scales + row / 128 * num_output_channels + column * 8 + order_map[pos];
-		int* z_item = zeros + row / 128 * num_output_channels / 8 + column;
-                int* w_item = kernel + row * num_output_channels / 8 + column;
+    int column = idx % num_packed_channels;
+    int row = idx / num_packed_channels;
 
-		half zero = __float2half(static_cast<float>((*z_item >> 4 * pos) & 0xf));
-		half weight = __float2half(static_cast<float>((*w_item >> 4 * pos) & 0xf));
+    if (idx < num_packed_channels * in_channels) {
+        int* z_item = zeros + row / 128 * num_output_channels / 8 + column;
+        int* w_item = kernel + row * num_output_channels / 8 + column;
 
-		half scaled_zero = __hmul(zero, *s_item);
-		half dequant = __hsub(__hmul(weight, *s_item), scaled_zero);
+        for (int pos = 0; pos < 8; pos++) {
+	    half* s_item = scales + row / 128 * num_output_channels + column * 8 + order_map[pos];
 
-		half* out_ptr = out_feats + row * num_output_channels + column * 8 + order_map[pos];
-                *(half*)(out_ptr) = dequant;
-            }
-         }
+	    half zero = __float2half(static_cast<float>((*z_item >> 4 * pos) & 0xf));
+	    half weight = __float2half(static_cast<float>((*w_item >> 4 * pos) & 0xf));
+
+	    half scaled_zero = __hmul(zero, *s_item);
+	    half dequant = __hsub(__hmul(weight, *s_item), scaled_zero);
+
+	    half* out_ptr = out_feats + row * num_output_channels + column * 8 + order_map[pos];
+	    *(half*)(out_ptr) = dequant;
+        }
     }
 }
 
@@ -128,7 +123,10 @@ torch::Tensor dequantize(
     auto scales = reinterpret_cast<half*>(_scaling_factors.data_ptr<at::Half>());
     auto zeros = reinterpret_cast<int*>(_zeros.data_ptr<int>());
 
-    _dequant<<<1, 1>>>(kernel, scales, zeros, out_feats, num_in_feats, num_packed_channels);
+    dim3 threads(32, 16);
+    dim3 blocks((num_in_feats * num_packed_channels + 512 - 1) / 512, 1);
+
+    _dequant<<<blocks, threads>>>(kernel, scales, zeros, out_feats, num_in_feats, num_packed_channels);
 
     return dq;
 }
