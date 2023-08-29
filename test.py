@@ -51,6 +51,32 @@ def find_matching_source_weights(source, ins, zeros):
     return name
 
 
+def perform_inference(target_kernel, ins, qweight, scales, zeros):
+    if target_kernel == Target.original:
+        result = awq_inference_engine.gemm_forward_cuda(
+            ins, qweight, scales, zeros, 8
+        )
+    elif target_kernel == Target.python:
+        result = python_impl(
+            ins, qweight, scales, zeros
+        )
+    elif target_kernel == Target.new:
+        result = new_inf.gemm_forward_cuda(
+            ins, qweight, scales, zeros
+        )
+    elif target_kernel == Target.python_new_dequant:
+        result = python_impl_cuda_dequant(
+            ins, qweight, scales, zeros
+        )
+    elif target_kernel == Target.exllama:
+        result = python_exllam_impl(
+            ins, qweight, scales, zeros
+        )
+    else:
+        raise NotImplementedError('unknown kernel {}'.format(target_kernel))
+    return result
+
+
 def test_file(f, target_kernel, source=None):
     """
     We are performing a linear layer on the same
@@ -75,29 +101,7 @@ def test_file(f, target_kernel, source=None):
             weights = load_original_layer(name.replace('.qzeros', '.weight'))
             expected = F.linear(ins.to(0), weights.to(0))
 
-    if target_kernel == Target.original:
-        result = awq_inference_engine.gemm_forward_cuda(
-            ins, qweight, scales, zeros, 8
-        )
-    elif target_kernel == Target.python:
-        result = python_impl(
-            ins, qweight, scales, zeros
-        )
-    elif target_kernel == Target.new:
-        result = new_inf.gemm_forward_cuda(
-            ins, qweight, scales, zeros
-        )
-    elif target_kernel == Target.python_new_dequant:
-        result = python_impl_cuda_dequant(
-            ins, qweight, scales, zeros
-        )
-    elif target_kernel == Target.exllama:
-        result = python_exllam_impl(
-            ins, qweight, scales, zeros
-        )
-    else:
-        raise NotImplementedError('unknown kernel {}'.format(target_kernel))
-
+    result = perform_inference(target_kernel, ins, qweight, scales, zeros)
     assert result.shape == outs.shape
 
     if source is not None:
@@ -301,15 +305,42 @@ def python_dequantize(kernel, scales, zeros):
     return res.to(torch.float16)
 
 
+def profile(method, repeats=50, warmups=2):
+    files = glob.glob(os.path.join(ROOT, 'regresion_*', '*.pt'))
+    datas = [torch.load(f) for f in files]
+
+    # warmup
+    print('performing warmup')
+    for _ in range(warmups):
+        for entry in datas:
+            result = perform_data_inference(method, entry)
+
+    start = time.time()
+
+    print('profiling {} for {} iterations'.format(method, repeats))
+    for _ in tqdm(range(repeats)):
+        for entry in datas:
+            result = perform_data_inference(method, entry)
+
+    return time.time() - start
+
+
+def perform_data_inference(method, data):
+    ins = data['input']
+    scales = data['scales']
+    qweight = data['qweight']
+    zeros = data['zeros']
+    return perform_inference(method, ins, qweight, scales, zeros)
+
+
+
 if __name__ == '__main__':
     #dequantize_test()
     test_cases = [
         Target.original,
-        #Target.python_new_dequant,
-        Target.original,
-        #Target.python,
         Target.new,
-        #Target.exllama,
+        Target.original,
+        Target.new,
     ]
 
     source = load_file('/code/wizard-vicuna-13b-uncensored-awq-4bit-g128/wizard-vicuna-13b-w4-g128-awq.safetensors')
@@ -321,4 +352,10 @@ if __name__ == '__main__':
         for f in folders:
             run_test(f, new_kernel, source)
         print('duration', time.time() - start)
+        print()
+
+    for new_kernel in test_cases:
+        print(new_kernel)
+        duration = profile(new_kernel, repeats=int(1e6), warmups=50)
+        print('duration {}'.format(duration))
         print()
