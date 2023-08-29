@@ -157,7 +157,8 @@ __global__ void quant_forward_mm(
     const int blocksize = 8;
 
     // preload into shared memory which is 10x faster than load from GMEM
-    __shared__ float s_weight[blocksize * blocksize];
+    __shared__ int s_weight[blocksize * blocksize];
+    //__shared__ half s_feats[blocksize * blocksize];
     __shared__ half s_feats[blocksize * blocksize];
 
     // need to make sure there is no repeated x-y pairs
@@ -180,7 +181,7 @@ __global__ void quant_forward_mm(
     // all the blocks start on row 0
     int* kernel_ptr = kernel + chunk_column * blocksize;
 
-    if (x < num_in_feats && y < num_packed_channels && chunk_column == 0 && chunk_row == 0) {
+    if (x < num_in_feats && y < num_packed_channels) {
 	// one column of kernel becomes 8 in the output due to dequantising
         float tmp_results[8] = {0.0};
 
@@ -199,6 +200,7 @@ __global__ void quant_forward_mm(
 	   for (int blockpos=0; blockpos < blocksize; blockpos++) {
 	       half f_item = s_feats[thread_row * blocksize + blockpos];
                int w_item = s_weight[blockpos * blocksize + thread_column];
+	       //int w_item = 286331153;
 
 	       int x_kernel_offset = shift + blockpos;
 

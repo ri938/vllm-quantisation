@@ -18,10 +18,11 @@ from enum import Enum
 ROOT = '/home/fsuser/test_layer'
 
 # turn off to help with debugging
-DEBUG_SCALES = True
-DEBUG_ZEROS = True
-DEBUG_KERNEL = True
-DEBUG_FEATS = True
+# settings all to True should be a 5120 all matrix
+DEBUG_SCALES = False
+DEBUG_ZEROS = False
+DEBUG_KERNEL = False
+DEBUG_FEATS = False
 
 
 class Target(Enum):
@@ -98,16 +99,17 @@ def test_file(f, target_kernel, source=None):
 
     # turning off zeros and scales can help debug
     if DEBUG_SCALES:
-        scales = torch.ones_like(scales)
+        scales = torch.ones_like(scales, dtype=torch.float16) * scales.mean()
 
     if DEBUG_ZEROS:
-        zeros = torch.zeros_like(zeros)
+        zeros = torch.zeros_like(zeros, dtype=torch.int32)
 
     if DEBUG_KERNEL:
-        qweight = torch.ones_like(qweight) * 120
+        # 1 << 4 * pos (range 8)
+        qweight = torch.ones_like(qweight, dtype=torch.int32) * 286331153
 
     if DEBUG_FEATS:
-        ins = torch.ones_like(ins)
+        ins = torch.ones_like(ins, dtype=torch.float16) * ins.mean()
 
     if DEBUG_SCALES or DEBUG_ZEROS or DEBUG_KERNEL or DEBUG_FEATS:
         # need to recalculate base
@@ -124,7 +126,7 @@ def test_file(f, target_kernel, source=None):
 
     result = perform_inference(target_kernel, ins, qweight, scales, zeros)
     assert result.shape == outs.shape
-    import pdb; pdb.set_trace()
+    #import pdb; pdb.set_trace()
 
     if source is not None:
         assert expected.shape == outs.shape
@@ -135,6 +137,7 @@ def test_file(f, target_kernel, source=None):
         print('against source mean {} max {}'.format(mean_diff, max_diff))
 
     diff = result - outs
+    #import pdb; pdb.set_trace()
     nan_ix = diff.isnan()
     #assert ((diff == 0.0) | nan_ix).all().item()
 
@@ -364,8 +367,9 @@ if __name__ == '__main__':
     source = None
 
     test_cases = [
-        Target.original,
+        #Target.original,
         Target.new,
+        Target.python,
     ]
 
     folders = glob.glob(ROOT + '/regression_*')
