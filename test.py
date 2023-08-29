@@ -337,16 +337,16 @@ def perform_data_inference(method, data):
 
 if __name__ == '__main__':
     #dequantize_test()
+
+    source = load_file('/code/wizard-vicuna-13b-uncensored-awq-4bit-g128/wizard-vicuna-13b-w4-g128-awq.safetensors')
+
     test_cases = [
-        Target.original,
-        Target.new,
         Target.original,
         Target.new,
     ]
 
-    source = load_file('/code/wizard-vicuna-13b-uncensored-awq-4bit-g128/wizard-vicuna-13b-w4-g128-awq.safetensors')
-
     folders = glob.glob(ROOT + '/regression_*')
+
     for new_kernel in test_cases:
         print('using new kernel: {}'.format(new_kernel))
         start = time.time()
@@ -354,6 +354,13 @@ if __name__ == '__main__':
             run_test(f, new_kernel, source)
         print('duration', time.time() - start)
         print()
+
+    test_cases = [
+        Target.original,
+        Target.new,
+        Target.original,
+        Target.new,
+    ]
 
     for new_kernel in test_cases:
         print(new_kernel)

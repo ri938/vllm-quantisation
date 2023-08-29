@@ -171,13 +171,13 @@ __global__ void _quant_mm(
 	   for (int pos = 0; pos < 8; pos++) {
 	       half* s_item = scales + shift / 128 * num_output_channels + y * 8 + order_map[pos];
 
-	       half zero = __float2half(static_cast<float>((*z_item >> 4 * pos) & 0xf));
-	       half weight = __float2half(static_cast<float>((*w_item >> 4 * pos) & 0xf));
+	       float zero = static_cast<float>((*z_item >> 4 * pos) & 0xf);
+	       float weight = static_cast<float>((*w_item >> 4 * pos) & 0xf);
 
-	       half scaled_zero = __hmul(zero, *s_item);
-	       half dequant = __hsub(__hmul(weight, *s_item), scaled_zero);
+	       float scaled_zero = zero * __half2float(*s_item);
+	       float dequant = (weight * __half2float(*s_item)) - scaled_zero;
 
-	       float value = __half2float(__hmul(*f_item, dequant));
+	       float value = __half2float(*f_item) * dequant;
 	       tmp_results[order_map[pos]] +=  value;
 	   }
         }
