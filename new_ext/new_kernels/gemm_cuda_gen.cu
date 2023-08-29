@@ -132,7 +132,7 @@ torch::Tensor dequantize(
 }
 
 
-__global__ void _quant_mm(
+__global__ void quant_forward_mm(
 	half* in_feats,
        	int* kernel,
        	half* scales,
@@ -153,33 +153,74 @@ __global__ void _quant_mm(
 
     int order_map[] = {0, 2, 4, 6, 1, 3, 5, 7}; 
 
-    const int blocksize = 32;
+    // they have to be the same dimension for this to work
+    const int blocksize = 8;
 
-    const int x = blockIdx.x;
-    const int y = blockIdx.y * blocksize + (threadIdx.x % blocksize);
+    // preload into shared memory which is 10x faster than load from GMEM
+    __shared__ float s_weight[blocksize * blocksize];
+    __shared__ half s_feats[blocksize * blocksize];
+
+    // need to make sure there is no repeated x-y pairs
+    const int x = blockIdx.x * blocksize + threadIdx.x / blocksize;
+    const int y = blockIdx.y * blocksize + threadIdx.x % blocksize;
+
+    // row and column in block-space
+    const int chunk_row = x / blocksize;
+    const int chunk_column = y / blocksize;
+
+    // position of the thread inside the moving block in either feats / kernel
+    const int thread_row = threadIdx.x / blocksize;
+    const int thread_column = threadIdx.x % blocksize;
 
     const int num_output_channels = num_packed_channels * 8;
 
-    if (x < num_in_feats && y < num_packed_channels) {
+    // all the blocks start on column 0
+    half* in_feats_ptr = in_feats + chunk_row * in_channels * blocksize;
+
+    // all the blocks start on row 0
+    int* kernel_ptr = kernel + chunk_column * blocksize;
+
+    if (x < num_in_feats && y < num_packed_channels && chunk_column == 0 && chunk_row == 0) {
+	// one column of kernel becomes 8 in the output due to dequantising
         float tmp_results[8] = {0.0};
 
-	for (int shift = 0; shift < in_channels; shift++) {
-	   half* f_item = in_feats + x * in_channels + shift;
-           int* w_item = kernel + shift * num_output_channels / 8 + y;
-           int* z_item = zeros + shift / 128 * num_output_channels / 8 + y;
+	for (int shift = 0; shift < in_channels; shift+=blocksize) {
+           // order not important for correctness but is important for coalescence
+           s_feats[thread_row * blocksize + thread_column] = in_feats_ptr[thread_row * in_channels + thread_column];
+           s_weight[thread_row * blocksize + thread_column] = kernel_ptr[thread_row * num_packed_channels + thread_column];
 
-	   for (int pos = 0; pos < 8; pos++) {
-	       half* s_item = scales + shift / 128 * num_output_channels + y * 8 + order_map[pos];
+	   __syncthreads();
 
-	       float zero = static_cast<float>((*z_item >> 4 * pos) & 0xf);
-	       float weight = static_cast<float>((*w_item >> 4 * pos) & 0xf);
+	   // advance the block forward
+	   in_feats_ptr += blocksize;
+	   kernel_ptr += blocksize * num_packed_channels;
 
-	       float scaled_zero = zero * __half2float(*s_item);
-	       float dequant = (weight * __half2float(*s_item)) - scaled_zero;
+	   // we are assuming we can perfecly break into blocks
+	   for (int blockpos=0; blockpos < blocksize; blockpos++) {
+	       half f_item = s_feats[thread_row * blocksize + blockpos];
+               int w_item = s_weight[blockpos * blocksize + thread_column];
 
-	       float value = __half2float(*f_item) * dequant;
-	       tmp_results[order_map[pos]] +=  value;
-	   }
+	       int x_kernel_offset = shift + blockpos;
+
+	       // for zeros and scales we read them as normal for now
+               int z_item = *(zeros + x_kernel_offset / 128 * num_output_channels / 8 + y);
+
+	       for (int pos=0; pos < 8; pos++) {
+	           half s_item = *(scales + x_kernel_offset / 128 * num_output_channels + y * 8 + order_map[pos]);
+
+	           float zero = static_cast<float>((z_item >> 4 * pos) & 0xf);
+	           float weight = static_cast<float>((w_item >> 4 * pos) & 0xf);
+
+	           float scaled_zero = zero * __half2float(s_item);
+	           float dequant = (weight * __half2float(s_item)) - scaled_zero;
+
+	           float value = __half2float(f_item) * dequant;
+	           tmp_results[order_map[pos]] +=  value;
+	       }
+           }
+
+	   // next loop will change the shared memory again
+	   __syncthreads();
         }
 
         for (int pos=0; pos < 8; pos++) {
@@ -195,7 +236,7 @@ __global__ void _quant_mm(
 // scaling_factors: IC // G, OC [float16]
 // zeros: IC // G, OC // 8 [int32] -> cast to IC // G, OC [uint4b]
 // out: M, OC
-torch::Tensor gemm_forward_cuda(
+torch::Tensor gemm_forward_cuda_new(
     torch::Tensor _in_feats,
     torch::Tensor _kernel,
     torch::Tensor _scaling_factors,
@@ -233,10 +274,19 @@ torch::Tensor gemm_forward_cuda(
     if (_zeros.size(1) * 8 != num_out_channels)
         throw std::invalid_argument("Invalid zeros size (dim1)");
 
-    dim3 threads(32);
-    dim3 blocks(num_in_feats, (num_packed_channels + 32 - 1) / 32);
+    if (num_in_feats % 8 != 0) {
+        throw std::invalid_argument("In feats must be divisible by 8");
+    }
 
-    _quant_mm<<<blocks, threads>>>(in_feats, kernel, scaling_factors, zeros, out_feats, num_in_channels, num_packed_channels, num_in_feats);
+    if (num_packed_channels % 8 != 0) {
+        throw std::invalid_argument("Packed channels must be divisible by 8");
+    }
+
+    int num_threads = 8 * 8;
+    dim3 threads(num_threads);
+    dim3 blocks((num_in_feats + 8 - 1) / 8, (num_packed_channels + 8 - 1) / 8);
+
+    quant_forward_mm<<<blocks, threads>>>(in_feats, kernel, scaling_factors, zeros, out_feats, num_in_channels, num_packed_channels, num_in_feats);
 
     return _out_feats;
 }

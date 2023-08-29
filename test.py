@@ -14,10 +14,14 @@ import new_inf
 
 from enum import Enum
 
-import exllama
 
+ROOT = '/home/fsuser/test_layer'
 
-ROOT = '/code/test_layer'
+# turn off to help with debugging
+DEBUG_SCALES = True
+DEBUG_ZEROS = True
+DEBUG_KERNEL = True
+DEBUG_FEATS = True
 
 
 class Target(Enum):
@@ -61,7 +65,7 @@ def perform_inference(target_kernel, ins, qweight, scales, zeros):
             ins, qweight, scales, zeros
         )
     elif target_kernel == Target.new:
-        result = new_inf.gemm_forward_cuda(
+        result = new_inf.gemm_forward_cuda_new(
             ins, qweight, scales, zeros
         )
     elif target_kernel == Target.python_new_dequant:
@@ -92,6 +96,23 @@ def test_file(f, target_kernel, source=None):
     qweight = data['qweight']
     zeros = data['zeros']
 
+    # turning off zeros and scales can help debug
+    if DEBUG_SCALES:
+        scales = torch.ones_like(scales)
+
+    if DEBUG_ZEROS:
+        zeros = torch.zeros_like(zeros)
+
+    if DEBUG_KERNEL:
+        qweight = torch.ones_like(qweight) * 120
+
+    if DEBUG_FEATS:
+        ins = torch.ones_like(ins)
+
+    if DEBUG_SCALES or DEBUG_ZEROS or DEBUG_KERNEL or DEBUG_FEATS:
+        # need to recalculate base
+        outs = perform_inference(Target.original, ins, qweight, scales, zeros)
+
     # find the source weights (useful for getting a real comparison)
     if source is not None:
         name = find_matching_source_weights(source, ins, zeros)
@@ -103,6 +124,7 @@ def test_file(f, target_kernel, source=None):
 
     result = perform_inference(target_kernel, ins, qweight, scales, zeros)
     assert result.shape == outs.shape
+    import pdb; pdb.set_trace()
 
     if source is not None:
         assert expected.shape == outs.shape
@@ -338,7 +360,8 @@ def perform_data_inference(method, data):
 if __name__ == '__main__':
     #dequantize_test()
 
-    source = load_file('/code/wizard-vicuna-13b-uncensored-awq-4bit-g128/wizard-vicuna-13b-w4-g128-awq.safetensors')
+    #source = load_file('/code/wizard-vicuna-13b-uncensored-awq-4bit-g128/wizard-vicuna-13b-w4-g128-awq.safetensors')
+    source = None
 
     test_cases = [
         Target.original,
