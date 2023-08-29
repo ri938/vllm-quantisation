@@ -306,8 +306,9 @@ def python_dequantize(kernel, scales, zeros):
 
 
 def profile(method, repeats=50, warmups=2):
-    files = glob.glob(os.path.join(ROOT, 'regresion_*', '*.pt'))
+    files = glob.glob(os.path.join(ROOT, 'regression_*', '*.pt'))
     datas = [torch.load(f) for f in files]
+    assert len(datas) > 0
 
     # warmup
     print('performing warmup')
@@ -356,6 +357,6 @@ if __name__ == '__main__':
 
     for new_kernel in test_cases:
         print(new_kernel)
-        duration = profile(new_kernel, repeats=int(1e6), warmups=50)
+        duration = profile(new_kernel, repeats=1000, warmups=50)
         print('duration {}'.format(duration))
         print()
