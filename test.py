@@ -87,7 +87,6 @@ def test_file(f, target_kernel, source=None):
         result = new_inf.gemm_forward_cuda(
             ins, qweight, scales, zeros
         )
-        import pdb ; pdb.set_trace()
     elif target_kernel == Target.python_new_dequant:
         result = python_impl_cuda_dequant(
             ins, qweight, scales, zeros
@@ -305,8 +304,9 @@ def python_dequantize(kernel, scales, zeros):
 if __name__ == '__main__':
     #dequantize_test()
     test_cases = [
+        Target.original,
         #Target.python_new_dequant,
-        #Target.original,
+        Target.original,
         #Target.python,
         Target.new,
         #Target.exllama,

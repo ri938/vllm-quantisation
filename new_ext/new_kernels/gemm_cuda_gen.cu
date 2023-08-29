@@ -155,14 +155,13 @@ __global__ void _quant_mm(
 
     const int blocksize = 32;
 
-    //const int x = blockIdx.x * blocksize + (threadIdx.x / blocksize);
     const int x = blockIdx.x;
     const int y = blockIdx.y * blocksize + (threadIdx.x % blocksize);
 
     const int num_output_channels = num_packed_channels * 8;
 
     if (x < num_in_feats && y < num_packed_channels) {
-        half tmp_results[8] = {__float2half(0.0)};
+        float tmp_results[8] = {0.0};
 
 	for (int shift = 0; shift < in_channels; shift++) {
 	   half* f_item = in_feats + x * in_channels + shift;
@@ -178,14 +177,14 @@ __global__ void _quant_mm(
 	       half scaled_zero = __hmul(zero, *s_item);
 	       half dequant = __hsub(__hmul(weight, *s_item), scaled_zero);
 
-	       tmp_results[order_map[pos]] = __hadd(tmp_results[order_map[pos]], dequant);
+	       float value = __half2float(__hmul(*f_item, dequant));
+	       tmp_results[order_map[pos]] +=  value;
 	   }
         }
 
         for (int pos=0; pos < 8; pos++) {
 	    half* out_ptr = out_feats + x * num_output_channels + y * 8 + pos;
-	    *(half*)(out_ptr) = tmp_results[pos];
-	    printf("x %d y %d pos %d\n", x, y, x * num_output_channels + y * 8 + pos);
+	    *(half*)(out_ptr) = __float2half(tmp_results[pos]);
         }
     }
 
