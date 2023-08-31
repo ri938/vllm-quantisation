@@ -158,7 +158,6 @@ __global__ void quant_forward_mm(
 
     // preload into shared memory which is 10x faster than load from GMEM
     __shared__ float s_weight[blocksize * blocksize * 8];
-    //__shared__ half s_feats[blocksize * blocksize];
     __shared__ half s_feats[blocksize * blocksize];
 
     // need to make sure there is no repeated x-y pairs
@@ -193,6 +192,7 @@ __global__ void quant_forward_mm(
            int z_item = *(zeros + x_kernel_offset / 128 * num_output_channels / 8 + y);
 	   int w_item = kernel_ptr[thread_row * num_packed_channels + thread_column];
 
+           // calculate and store the dequantized weights
 	   for (int pos = 0; pos < 8; pos++) {
 	       half s_item = *(scales + x_kernel_offset / 128 * num_output_channels + y * 8 + order_map[pos]);
 
@@ -218,6 +218,7 @@ __global__ void quant_forward_mm(
 	       half f_item = s_feats[thread_row * blocksize + blockpos];
 
 	       for (int pos=0; pos < 8; pos++) {
+		   // block cause of high MIO throttling and instructions executed
 		   float dequant = s_weight[pos * blocksize * blocksize + blockpos * 8 + thread_column];
 	           float value = __half2float(f_item) * dequant;
 	           tmp_results[pos] +=  value;
