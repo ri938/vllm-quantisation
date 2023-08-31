@@ -7,5 +7,4 @@
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
     m.def("gemm_forward_cuda_new", &gemm_forward_cuda_new, "Quantized GEMM kernel.");
-    m.def("dequantize", &dequantize, "Dequantize");
 }
