@@ -6,6 +6,10 @@
 #include <cstdio>
 
 
+#define CEIL_DIV(A, B) (((A) + (B)-1) / (B))
+
+// dimensions of moving block for feats-x, kernel-y and common
+template<int blocksize_x, int blocksize_y, int blocksize_depth>
 __global__ void quant_forward_mm(
 	half* in_feats,
        	int* kernel,
@@ -25,44 +29,43 @@ __global__ void quant_forward_mm(
       IC = IF
     */
 
+    // AWQ stores 4bits in this order
     int order_map[] = {0, 2, 4, 6, 1, 3, 5, 7}; 
 
-    // they have to be the same dimension for this to work
-    const int blocksize = 8;
-
+    // one zero and scale per input channel group
     const int groupsize = 128;
 
     // preload into shared memory which is 10x faster than load from GMEM
-    __shared__ float s_weight[blocksize * blocksize * 8];
-    __shared__ half s_feats[blocksize * blocksize];
+    __shared__ float s_weight[blocksize_y * blocksize_depth * 8];
+    __shared__ half s_feats[blocksize_x * blocksize_depth];
 
     // need to make sure there is no repeated x-y pairs
-    const int x = blockIdx.x * blocksize + threadIdx.x / blocksize;
-    const int y = blockIdx.y * blocksize + threadIdx.x % blocksize;
+    const int x = blockIdx.x * blocksize_x + threadIdx.x / blocksize_depth;
+    const int y = blockIdx.y * blocksize_y + threadIdx.x % blocksize_depth;
 
     // row and column in block-space
-    const int chunk_row = x / blocksize;
-    const int chunk_column = y / blocksize;
+    const int chunk_row = x / blocksize_x;
+    const int chunk_column = y / blocksize_y;
 
     // position of the thread inside the moving block in either feats / kernel
-    const int thread_row = threadIdx.x / blocksize;
-    const int thread_column = threadIdx.x % blocksize;
+    const int thread_row = threadIdx.x / blocksize_depth;
+    const int thread_column = threadIdx.x % blocksize_depth;
 
     const int num_output_channels = num_packed_channels * 8;
 
     // all the blocks start on column 0
-    half* in_feats_ptr = in_feats + chunk_row * in_channels * blocksize;
+    half* in_feats_ptr = in_feats + blocksize_x * chunk_row * in_channels;
 
     // all the blocks start on row 0
-    int* kernel_ptr = kernel + chunk_column * blocksize;
+    int* kernel_ptr = kernel + blocksize_y * chunk_column;
 
     if (x < num_in_feats && y < num_packed_channels) {
 	// one column of kernel becomes 8 in the output due to dequantising
         float tmp_results[8] = {0.0};
 
-	for (int shift = 0; shift < in_channels; shift+=blocksize) {
+	for (int shift = 0; shift < in_channels; shift+=blocksize_depth) {
            // order not important for correctness but is important for coalescence
-           s_feats[thread_row * blocksize + thread_column] = in_feats_ptr[thread_row * in_channels + thread_column];
+           s_feats[thread_row * blocksize_depth + thread_column] = in_feats_ptr[thread_row * in_channels + thread_column];
 
 	   int x_kernel_offset = shift + thread_row;
            int z_item = *(zeros + x_kernel_offset / groupsize * num_output_channels / 8 + y);
@@ -79,23 +82,23 @@ __global__ void quant_forward_mm(
 	       float dequant = (weight * __half2float(s_item)) - scaled_zero;
 
 	       // index chosen to remove bank conflicts (matrix as pos-row-column order)
-               int idx = order_map[pos] * blocksize * blocksize + thread_row * 8 + thread_column;
+               int idx = order_map[pos] * blocksize_depth * blocksize_y + thread_row * blocksize_depth + thread_column;
 	       s_weight[idx] = dequant;
            }
 
 	   __syncthreads();
 
 	   // advance the block forward
-	   in_feats_ptr += blocksize;
-	   kernel_ptr += blocksize * num_packed_channels;
+	   in_feats_ptr += blocksize_depth;
+	   kernel_ptr += blocksize_depth * num_packed_channels;
 
 	   // multiply the features and weights together
-	   for (int blockpos=0; blockpos < blocksize; blockpos++) {
-	       half f_item = s_feats[thread_row * blocksize + blockpos];
+	   for (int blockpos=0; blockpos < blocksize_depth; blockpos++) {
+	       half f_item = s_feats[thread_row * blocksize_depth + blockpos];
 
 	       for (int pos=0; pos < 8; pos++) {
 		   // block cause of high MIO throttling and instructions executed
-		   float dequant = s_weight[pos * blocksize * blocksize + blockpos * 8 + thread_column];
+		   float dequant = s_weight[pos * blocksize_depth * blocksize_y + blockpos * blocksize_depth + thread_column];
 	           float value = __half2float(f_item) * dequant;
 	           tmp_results[pos] +=  value;
 	       }
@@ -165,11 +168,24 @@ torch::Tensor gemm_forward_cuda_new(
         throw std::invalid_argument("Packed channels must be divisible by 8");
     }
 
-    int num_threads = 8 * 8;
-    dim3 threads(num_threads);
-    dim3 blocks((num_in_feats + 8 - 1) / 8, (num_packed_channels + 8 - 1) / 8);
+    // for now they must be the same dimension
+    const int blocksize_y = 8;
+    const int blocksize_x = 8;
+    const int blocksize_depth = 8;
 
-    quant_forward_mm<<<blocks, threads>>>(in_feats, kernel, scaling_factors, zeros, out_feats, num_in_channels, num_packed_channels, num_in_feats);
+    assert(blocksize_x == blocksize_y);
+    assert(num_in_feats % blocksize_x == 0);
+    assert(num_in_channels % blocksize_depth == 0);
+    assert(num_packed_channels % blocksize_y == 0);
+
+    dim3 threads(blocksize_depth * blocksize_x);
+
+    dim3 blocks(CEIL_DIV(num_in_feats, blocksize_x), CEIL_DIV(num_packed_channels, blocksize_y));
+
+    quant_forward_mm<blocksize_x, blocksize_y, blocksize_depth><<<blocks, threads>>>(
+        in_feats, kernel, scaling_factors, zeros, out_feats, num_in_channels,
+       	num_packed_channels, num_in_feats
+    );
 
     return _out_feats;
 }
