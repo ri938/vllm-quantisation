@@ -369,7 +369,7 @@ if __name__ == '__main__':
     test_cases = [
         #Target.original,
         Target.new,
-        Target.python,
+        #Target.python,
     ]
 
     folders = glob.glob(ROOT + '/regression_*')
@@ -383,10 +383,10 @@ if __name__ == '__main__':
         print()
 
     test_cases = [
-        Target.original,
         Target.new,
         Target.original,
         Target.new,
+        Target.original,
     ]
 
     for new_kernel in test_cases:

@@ -157,7 +157,7 @@ __global__ void quant_forward_mm(
     const int blocksize = 8;
 
     // preload into shared memory which is 10x faster than load from GMEM
-    __shared__ int s_weight[blocksize * blocksize];
+    __shared__ float s_weight[blocksize * blocksize * 8];
     //__shared__ half s_feats[blocksize * blocksize];
     __shared__ half s_feats[blocksize * blocksize];
 
@@ -188,7 +188,24 @@ __global__ void quant_forward_mm(
 	for (int shift = 0; shift < in_channels; shift+=blocksize) {
            // order not important for correctness but is important for coalescence
            s_feats[thread_row * blocksize + thread_column] = in_feats_ptr[thread_row * in_channels + thread_column];
-           s_weight[thread_row * blocksize + thread_column] = kernel_ptr[thread_row * num_packed_channels + thread_column];
+
+	   int x_kernel_offset = shift + thread_row;
+           int z_item = *(zeros + x_kernel_offset / 128 * num_output_channels / 8 + y);
+	   int w_item = kernel_ptr[thread_row * num_packed_channels + thread_column];
+
+	   for (int pos = 0; pos < 8; pos++) {
+	       half s_item = *(scales + x_kernel_offset / 128 * num_output_channels + y * 8 + order_map[pos]);
+
+	       float zero = static_cast<float>((z_item >> 4 * pos) & 0xf);
+	       float weight = static_cast<float>((w_item >> 4 * pos) & 0xf);
+
+	       float scaled_zero = zero * __half2float(s_item);
+	       float dequant = (weight * __half2float(s_item)) - scaled_zero;
+
+	       // index chosen to remove bank conflicts (matrix as pos-row-column order)
+               int idx = order_map[pos] * blocksize * blocksize + thread_row * 8 + thread_column;
+	       s_weight[idx] = dequant;
+           }
 
 	   __syncthreads();
 
@@ -196,28 +213,14 @@ __global__ void quant_forward_mm(
 	   in_feats_ptr += blocksize;
 	   kernel_ptr += blocksize * num_packed_channels;
 
-	   // we are assuming we can perfecly break into blocks
+	   // multiply the features and weights together
 	   for (int blockpos=0; blockpos < blocksize; blockpos++) {
 	       half f_item = s_feats[thread_row * blocksize + blockpos];
-               int w_item = s_weight[blockpos * blocksize + thread_column];
-	       //int w_item = 286331153;
-
-	       int x_kernel_offset = shift + blockpos;
-
-	       // for zeros and scales we read them as normal for now
-               int z_item = *(zeros + x_kernel_offset / 128 * num_output_channels / 8 + y);
 
 	       for (int pos=0; pos < 8; pos++) {
-	           half s_item = *(scales + x_kernel_offset / 128 * num_output_channels + y * 8 + order_map[pos]);
-
-	           float zero = static_cast<float>((z_item >> 4 * pos) & 0xf);
-	           float weight = static_cast<float>((w_item >> 4 * pos) & 0xf);
-
-	           float scaled_zero = zero * __half2float(s_item);
-	           float dequant = (weight * __half2float(s_item)) - scaled_zero;
-
+		   float dequant = s_weight[pos * blocksize * blocksize + blockpos * 8 + thread_column];
 	           float value = __half2float(f_item) * dequant;
-	           tmp_results[order_map[pos]] +=  value;
+	           tmp_results[pos] +=  value;
 	       }
            }
 
@@ -225,6 +228,7 @@ __global__ void quant_forward_mm(
 	   __syncthreads();
         }
 
+	// write out the results for this position
         for (int pos=0; pos < 8; pos++) {
 	    half* out_ptr = out_feats + x * num_output_channels + y * 8 + pos;
 	    *(half*)(out_ptr) = __float2half(tmp_results[pos]);

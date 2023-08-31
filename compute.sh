@@ -11,7 +11,7 @@ export PYTHONPATH=$PYTHNPATH:/home/fsuser/vllm-quantisation
        	-c 5 \
 	--import-source on \
 	-s 20 \
-	-k "_quant_mm" \
+	-k "quant_forward_mm" \
 	--source-folders /home/fsuser/vllm-quantisation/new_ext/new_kernels \
        	python3 test.py
 
