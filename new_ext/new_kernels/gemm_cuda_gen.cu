@@ -44,16 +44,21 @@ __global__ void quant_forward_mm(
     // need to make sure there is no repeated x-y pairs
     const int x = blockIdx.x * blocksize_x + threadIdx.x / blocksize_depth;
 
-    // each tile is responsible for tile_y consecutive elements so this is just the start
-    const int y_offset = blockIdx.y * blocksize_y + (tile_y * threadIdx.x) % blocksize_y;
-
     // which entries the thread is responsible for in the feat block
     const int feat_row = threadIdx.x / blocksize_depth;
     const int feat_col = threadIdx.x % blocksize_depth;
 
+    // each tile is responsible for tile_y consecutive elements so this is just the start
+    const int num_threads = blockDim.x;
+    const int y_offset = blockIdx.y * blocksize_y + (threadIdx.x % tile_y);
+    //const int y_offset = blockIdx.y * blocksize_y + (threadIdx.x % num_threads);
+
     // for the kernel block (in y dimension its the starting position)
     const int kernel_row = (threadIdx.x * tile_y) / blocksize_y;
-    const int kernel_col_offset = (threadIdx.x * tile_y) % blocksize_y;
+    const int kernel_col_offset = threadIdx.x % tile_y;
+    const int kernel_col_stride = blocksize_y / tile_y;
+    //const int kernel_col_offset = threadIdx.x % num_threads;
+    //const int kernel_col_stride = blocksize_y / num_threads;
 
     // position the block pointers at the start
     half* in_feats_ptr = in_feats + blocksize_x * blockIdx.x * in_channels;
@@ -71,10 +76,10 @@ __global__ void quant_forward_mm(
        // each thread is responsible for loading tile_y elements from the kernel block
        for (int tid=0; tid < tile_y; tid++) {
            int x_kernel_offset = shift + kernel_row;
-           int y_kernel_offset = y_offset + tid;
+           int y_kernel_offset = y_offset + tid * kernel_col_stride;
 
            int z_item = *(zeros + x_kernel_offset / groupsize * num_output_channels / 8 + y_kernel_offset);
-           int w_item = kernel_ptr[kernel_row * num_packed_channels + kernel_col_offset + tid];
+           int w_item = kernel_ptr[kernel_row * num_packed_channels + kernel_col_offset + tid * kernel_col_stride];
 
            // calculate and store the dequantized weights
            for (int pos = 0; pos < 8; pos++) {
@@ -88,7 +93,7 @@ __global__ void quant_forward_mm(
 
                // index chosen to remove bank conflicts (matrix as pos-row-column order)
                //int idx = order_map[pos] * blocksize_depth * blocksize_y + kernel_row * blocksize_depth + kernel_col_offset + tid;
-               int idx = order_map[pos] * blocksize_depth * blocksize_y + kernel_row * blocksize_y + kernel_col_offset + tid;
+               int idx = order_map[pos] * blocksize_depth * blocksize_y + kernel_row * blocksize_y + kernel_col_offset + tid * kernel_col_stride;
                s_weight[idx] = dequant;
            }
        }
@@ -106,7 +111,7 @@ __global__ void quant_forward_mm(
            for (int tid=0; tid < tile_y; tid++) {
                for (int pos=0; pos < 8; pos++) {
 	           //float dequant = s_weight[pos * blocksize_depth * blocksize_y + blockpos * blocksize_depth + kernel_col_offset + tid];
-	           float dequant = s_weight[pos * blocksize_depth * blocksize_y + blockpos * blocksize_y + kernel_col_offset + tid];
+	           float dequant = s_weight[pos * blocksize_depth * blocksize_y + blockpos * blocksize_y + kernel_col_offset + tid * kernel_col_stride];
 	           float value = __half2float(f_item) * dequant;
 	           tmp_results[tid * 8 + pos] +=  value;
                }
@@ -120,7 +125,7 @@ __global__ void quant_forward_mm(
     // write out the results for this position
     for (int pos=0; pos < 8; pos++) {
 	for (int tid=0; tid < tile_y; tid++) {
-            half* out_ptr = out_feats + x * num_output_channels + (y_offset + tid) * 8 + pos;
+            half* out_ptr = out_feats + x * num_output_channels + (y_offset + tid * kernel_col_stride) * 8 + pos;
             *(half*)(out_ptr) = __float2half(tmp_results[tid * 8 + pos]);
 	}
     }
