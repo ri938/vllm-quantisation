@@ -48,16 +48,15 @@ __global__ void quant_forward_mm(
     const int feat_row = threadIdx.x / blocksize_depth;
     const int feat_col = threadIdx.x % blocksize_depth;
 
-    // each tile is responsible for tile_y consecutive elements so this is just the start
     const int num_threads = blockDim.x;
+
+    // each tile is responsible for tile_y consecutive elements so this is just the start
     const int y_offset = blockIdx.y * blocksize_y + (threadIdx.x % tile_y);
-    //const int y_offset = blockIdx.y * blocksize_y + (threadIdx.x % num_threads);
 
     // for the kernel block (in y dimension its the starting position)
     const int kernel_row = (threadIdx.x * tile_y) / blocksize_y;
     const int kernel_col_offset = threadIdx.x % tile_y;
     const int kernel_col_stride = blocksize_y / tile_y;
-    //const int kernel_col_offset = threadIdx.x % num_threads;
     //const int kernel_col_stride = blocksize_y / num_threads;
 
     // position the block pointers at the start
@@ -73,13 +72,20 @@ __global__ void quant_forward_mm(
        // relies on assumption that num threads == size of feats block
        s_feats[feat_row * blocksize_depth + feat_col] = in_feats_ptr[feat_row * in_channels + feat_col];
 
-       // each thread is responsible for loading tile_y elements from the kernel block
+       // load in column order to reduce bank conflicts
        for (int tid=0; tid < tile_y; tid++) {
-           int x_kernel_offset = shift + kernel_row;
-           int y_kernel_offset = y_offset + tid * kernel_col_stride;
+           //int x_kernel_offset = shift + kernel_row;
+	   int x_block_offset = tid;
+	   int y_block_offset = threadIdx.x;
+
+           int x_kernel_offset = shift + tid;
+           int y_kernel_offset = blockIdx.y * blocksize_y + threadIdx.x;
+           //int y_kernel_offset = y_offset + tid * kernel_col_stride;
+           //int y_kernel_offset = y_offset + threadIdx.x;
 
            int z_item = *(zeros + x_kernel_offset / groupsize * num_output_channels / 8 + y_kernel_offset);
-           int w_item = kernel_ptr[kernel_row * num_packed_channels + kernel_col_offset + tid * kernel_col_stride];
+           //int w_item = kernel_ptr[kernel_row * num_packed_channels + kernel_col_offset + tid * kernel_col_stride];
+           int w_item = kernel_ptr[x_block_offset * num_packed_channels + y_block_offset];
 
            // calculate and store the dequantized weights
            for (int pos = 0; pos < 8; pos++) {
@@ -93,7 +99,8 @@ __global__ void quant_forward_mm(
 
                // index chosen to remove bank conflicts (matrix as pos-row-column order)
                //int idx = order_map[pos] * blocksize_depth * blocksize_y + kernel_row * blocksize_depth + kernel_col_offset + tid;
-               int idx = order_map[pos] * blocksize_depth * blocksize_y + kernel_row * blocksize_y + kernel_col_offset + tid * kernel_col_stride;
+               //int idx = order_map[pos] * blocksize_depth * blocksize_y + kernel_row * blocksize_y + kernel_col_offset + tid * kernel_col_stride;
+               int idx = order_map[pos] * blocksize_depth * blocksize_y + x_block_offset * blocksize_y + y_block_offset;
                s_weight[idx] = dequant;
            }
        }
