@@ -37,7 +37,8 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.layers import quant
+#from vllm.model_executor.layers import quant
+from vllm.model_executor.layers import qmodule
 from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
                                               load_tensor_parallel_weights)
 from vllm.model_executor.parallel_utils.parallel_state import (
@@ -141,7 +142,8 @@ class LlamaAttention(nn.Module):
 
 
 def get_quantized_layer(in_features, out_features, quant_config):
-    layer = quant.AWQLinear(
+    #layer = quant.AWQLinear(
+    layer = qmodule.WQLinear(
         w_bit=quant_config.bits,
         group_size=quant_config.group_size,
         in_features=in_features,
@@ -416,6 +418,7 @@ class LlamaForCausalLM(nn.Module):
             if "rotary_emb.inv_freq" in name:
                 continue
 
+            print('loading {}'.format(name))
             if "embed_tokens" in name or "lm_head" in name:
                 param = state_dict[name]
                 # Consider padding in the vocab size.
@@ -429,7 +432,7 @@ class LlamaForCausalLM(nn.Module):
             is_quantized = self.quant_config is not None
 
             is_attention_weight = False
-            for weight_name, shard_size, offset in attention_weight_specs:
+            for stride_id, (weight_name, shard_size, offset) in enumerate(attention_weight_specs):
                 if weight_name not in name:
                     continue
                 param = state_dict[name.replace(weight_name, "qkv_proj")]
@@ -440,12 +443,10 @@ class LlamaForCausalLM(nn.Module):
                         (tensor_model_parallel_rank + 1)]
                     param_slice = param.data[offset:offset + shard_size]
                 else:
-                    # TODO: this is specific to AWQ
-                    if "qweight" in name or "qzeros" in name:
-                        adjustment = 32 / self.quant_config.bits
-                        shard_size = int(shard_size // adjustment)
-                        offset = int(offset // adjustment)
-                    param_slice = param.data[:, offset:offset + shard_size]
+                    shard_size = param.shape[0] // 3
+                    start = shard_size * stride_id
+                    end = shard_size * (stride_id + 1)
+                    param_slice = param.data[start:end,:]
 
                 assert param_slice.shape == loaded_weight.shape
 
@@ -469,10 +470,10 @@ class LlamaForCausalLM(nn.Module):
                     param_slice = param.data[shard_size * stride_id:shard_size *
                                              (stride_id + 1)]
                 else:
-                    shard_size = param.shape[1] // 2
+                    shard_size = param.shape[0] // 2
                     start = shard_size * stride_id
                     end = shard_size * (stride_id + 1)
-                    param_slice = param.data[:, start:end]
+                    param_slice = param.data[start:end,:]
 
                 assert param_slice.shape == loaded_weight.shape
                 param_slice.copy_(loaded_weight)
